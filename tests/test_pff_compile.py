@@ -25,10 +25,13 @@ import poietics.pff.compile as compile_module
 import poietics.pff.local_checkers as local_checkers_module
 from poietics.pff.model import (
     BasePartition,
+    ChallengeRecord,
     CheckResult,
     ClosedNegativeLiteral,
     ClosureRecord,
     ContraryRecord,
+    DischargeRecord,
+    FaceRecord,
     Package,
     RecordKind,
     RuleRecord,
@@ -36,8 +39,10 @@ from poietics.pff.model import (
 )
 from poietics.pff.registry import (
     CheckerContract,
+    CheckerDetailType,
     CheckerUse,
     RegistryCatalog,
+    SelectorFieldContract,
 )
 import poietics.pff.validate as validate_module
 from poietics.pff.validate import ValidatedPackage, validate_package
@@ -76,7 +81,15 @@ def compiler_catalog() -> RegistryCatalog:
         checker_id=SUPPLIED_CLOSURE_CHECKER,
         version=1,
         uses={CheckerUse.CLOSURE},
-        closure_selector_kinds={RecordKind.ATOM},
+        closure_selector_kinds={RecordKind.ATOM, RecordKind.CHALLENGE},
+        selector_fields=(
+            SelectorFieldContract(
+                record_type=RecordKind.CHALLENGE,
+                field="target",
+                value_type=CheckerDetailType.RECORD_REF,
+                allowed_record_kinds={RecordKind.FACE},
+            ),
+        ),
         closure_frame_policy_id="frame:exact-package",
     )
     return RegistryCatalog(
@@ -114,6 +127,151 @@ def supplied_closure(
         cut_id="cut:1",
         frame="frame:1",
         selector=Selector(record_type=RecordKind.ATOM),
+    )
+
+
+def supplied_blocker_closure(
+    record_id: str,
+    result: CheckResult,
+    target: object,
+    *,
+    version: int = 1,
+) -> ClosureRecord:
+    return ClosureRecord(
+        id=record_id,
+        version=version,
+        checker=SUPPLIED_CLOSURE_CHECKER,
+        result=result,
+        cut_id="cut:1",
+        frame="frame:1",
+        selector=Selector(
+            record_type=RecordKind.CHALLENGE,
+            where={"target": target},
+        ),
+    )
+
+
+def face_package(
+    blocker_result: CheckResult = CheckResult.PASS,
+) -> Package:
+    return face_graph_package(
+        (("face:frame", 1, "rule:derive", 1, "closure:blockers", 1, blocker_result),)
+    )
+
+
+def face_graph_package(
+    cases: tuple[tuple[str, int, str, int, str, int, CheckResult], ...],
+) -> Package:
+    seed = minimal_valid_package()
+    faces_by_rule: dict[tuple[str, int], list[object]] = {}
+    for face_id, face_version, rule_id, rule_version, *_ in cases:
+        faces_by_rule.setdefault((rule_id, rule_version), []).append(
+            ref(face_id, face_version)
+        )
+
+    rules = tuple(
+        replace(
+            seed.rules[0],
+            id=rule_id,
+            version=rule_version,
+            certificate=ref(rule_id.replace("rule:", "cert:", 1), rule_version),
+            faces=tuple(face_refs),
+        )
+        for (rule_id, rule_version), face_refs in faces_by_rule.items()
+    )
+    rule_index = {(rule.id, rule.version): rule for rule in rules}
+    faces = tuple(
+        FaceRecord(
+            id=face_id,
+            version=face_version,
+            owner_rule=rule_index[(rule_id, rule_version)].ref,
+            kind="frame",
+            boundary="frame:1",
+            carrier=f"entity:{position}",
+            blocker_closure=ref(closure_id, closure_version),
+        )
+        for position, (
+            face_id,
+            face_version,
+            rule_id,
+            rule_version,
+            closure_id,
+            closure_version,
+            _,
+        ) in enumerate(cases)
+    )
+    closures = tuple(
+        supplied_blocker_closure(
+            closure_id,
+            result,
+            face.ref,
+            version=closure_version,
+        )
+        for face, (*_, closure_id, closure_version, result) in zip(
+            faces, cases, strict=True
+        )
+    )
+    certificates = tuple(
+        replace(
+            certificate(
+                f"cert:temporary:{position}",
+                "rule-witness/v1",
+                rule.ref,
+            ),
+            id=rule.certificate.id,
+            version=rule.certificate.version,
+        )
+        for position, rule in enumerate(rules)
+    )
+    return replace(
+        seed,
+        rules=rules,
+        faces=faces,
+        certificates=certificates,
+        closures=closures,
+    )
+
+
+def conjunctive_face_package() -> Package:
+    return face_graph_package(
+        (
+            ("face:first", 1, "rule:derive", 1, "closure:first-face", 1, CheckResult.PASS),
+            ("face:second", 1, "rule:derive", 1, "closure:second-face", 1, CheckResult.FAIL),
+        )
+    )
+
+
+def alternative_face_package() -> Package:
+    return face_graph_package(
+        (
+            ("face:z", 1, "rule:z-face", 1, "closure:z-face", 1, CheckResult.FAIL),
+            ("face:a", 1, "rule:a-face", 1, "closure:a-face", 1, CheckResult.PASS),
+        )
+    )
+
+
+def versioned_face_package() -> Package:
+    return face_graph_package(
+        (
+            (
+                "face:versioned",
+                7,
+                "rule:versioned-face",
+                3,
+                "closure:versioned-face",
+                11,
+                CheckResult.PASS,
+            ),
+            (
+                "face:versioned",
+                5,
+                "rule:versioned-face",
+                2,
+                "closure:versioned-face",
+                9,
+                CheckResult.PASS,
+            ),
+        )
     )
 
 
@@ -371,6 +529,86 @@ class ExactLoweringTests(unittest.TestCase):
                 origin,
             )
 
+    def test_face_program_and_source_map_match_an_independent_golden(self) -> None:
+        source = validated(face_package())
+
+        compiled = compile_package(source)
+
+        cert_valid = "__pff__:cert-valid(cert:derive@1)"
+        cert_failed = "__pff__:cert-failed(cert:derive@1)"
+        cert_open = "__pff__:cert-open(cert:derive@1)"
+        closure_ready = "__pff__:closure-ready(closure:blockers@1)"
+        closure_failed = "__pff__:closure-failed(closure:blockers@1)"
+        closure_open = "__pff__:closure-open(closure:blockers@1)"
+        face = "__pff__:face(face:frame@1)"
+        has_open = "__pff__:has-open-challenge(face:frame@1)"
+        clear = "__pff__:clear(face:frame@1)"
+        live_case = "__pff__:live-case(rule:derive@1)"
+        clear_rule = "__pff__:clear-face(face:frame@1)"
+        expected_program = GroundProgram(
+            atoms={
+                "atom:source@1",
+                "atom:derived@1",
+                cert_valid,
+                cert_failed,
+                cert_open,
+                closure_ready,
+                closure_failed,
+                closure_open,
+                face,
+                has_open,
+                clear,
+                live_case,
+            },
+            rules=(
+                literal_rule(
+                    clear_rule,
+                    clear,
+                    positive={face, closure_ready},
+                    negative={has_open},
+                ),
+                literal_rule(
+                    "__pff__:rule-case(rule:derive@1)",
+                    live_case,
+                    positive={cert_valid, "atom:source@1", clear},
+                ),
+                literal_rule(
+                    "__pff__:head-bridge(rule:derive@1)",
+                    "atom:derived@1",
+                    positive={live_case},
+                ),
+            ),
+            base_live={"atom:source@1", cert_valid, closure_ready, face},
+        )
+        origin_rows = (
+            (GroundArtifactKind.ATOM, cert_failed, CompilationRole.CERT_FAILED, RecordKind.CERTIFICATE, "cert:derive"),
+            (GroundArtifactKind.ATOM, cert_open, CompilationRole.CERT_OPEN, RecordKind.CERTIFICATE, "cert:derive"),
+            (GroundArtifactKind.ATOM, cert_valid, CompilationRole.CERT_VALID, RecordKind.CERTIFICATE, "cert:derive"),
+            (GroundArtifactKind.ATOM, clear, CompilationRole.CLEAR, RecordKind.FACE, "face:frame"),
+            (GroundArtifactKind.ATOM, closure_failed, CompilationRole.CLOSURE_FAILED, RecordKind.CLOSURE, "closure:blockers"),
+            (GroundArtifactKind.ATOM, closure_open, CompilationRole.CLOSURE_OPEN, RecordKind.CLOSURE, "closure:blockers"),
+            (GroundArtifactKind.ATOM, closure_ready, CompilationRole.CLOSURE_READY, RecordKind.CLOSURE, "closure:blockers"),
+            (GroundArtifactKind.ATOM, face, CompilationRole.FACE, RecordKind.FACE, "face:frame"),
+            (GroundArtifactKind.ATOM, has_open, CompilationRole.HAS_OPEN_CHALLENGE, RecordKind.FACE, "face:frame"),
+            (GroundArtifactKind.ATOM, live_case, CompilationRole.LIVE_CASE, RecordKind.RULE, "rule:derive"),
+            (GroundArtifactKind.ATOM, "atom:derived@1", CompilationRole.SOURCE_ATOM, RecordKind.ATOM, "atom:derived"),
+            (GroundArtifactKind.ATOM, "atom:source@1", CompilationRole.SOURCE_ATOM, RecordKind.ATOM, "atom:source"),
+            (GroundArtifactKind.RULE, clear_rule, CompilationRole.CLEAR_FACE, RecordKind.FACE, "face:frame"),
+            (GroundArtifactKind.RULE, "__pff__:head-bridge(rule:derive@1)", CompilationRole.HEAD_BRIDGE, RecordKind.RULE, "rule:derive"),
+            (GroundArtifactKind.RULE, "__pff__:rule-case(rule:derive@1)", CompilationRole.RULE_CASE, RecordKind.RULE, "rule:derive"),
+        )
+        expected_origins = tuple(literal_origin(*row) for row in origin_rows)
+
+        self.assertIs(compiled.source, source)
+        self.assertEqual(compiled.program, expected_program)
+        for origin in expected_origins:
+            self.assertEqual(
+                compiled.origin_for(origin.artifact_kind, origin.artifact_ref),
+                origin,
+                f"ORIGIN_MISMATCH:{origin.artifact_ref}",
+            )
+        self.assertEqual(compiled.origins, expected_origins)
+
     def test_certificate_result_table_is_literal_and_complete(self) -> None:
         compiled = compile_package(validated(certificate_matrix_package()))
 
@@ -618,6 +856,189 @@ class ExactLoweringTests(unittest.TestCase):
 
                 self.assertEqual(result.status_of("atom:derived@1"), expected)
 
+    def test_face_blocker_closure_results_drive_clearance(self) -> None:
+        expected = {
+            CheckResult.PASS: (
+                Status.LIVE,
+                Status.EXCLUDED,
+                Status.EXCLUDED,
+            ),
+            CheckResult.FAIL: (
+                Status.SUSPENDED,
+                Status.LIVE,
+                Status.EXCLUDED,
+            ),
+            CheckResult.OPEN: (
+                Status.SUSPENDED,
+                Status.EXCLUDED,
+                Status.LIVE,
+            ),
+        }
+        ready = "__pff__:closure-ready(closure:blockers@1)"
+        failed = "__pff__:closure-failed(closure:blockers@1)"
+        opened = "__pff__:closure-open(closure:blockers@1)"
+        face = "__pff__:face(face:frame@1)"
+        blocker = "__pff__:has-open-challenge(face:frame@1)"
+        clear = "__pff__:clear(face:frame@1)"
+        live_case = "__pff__:live-case(rule:derive@1)"
+
+        for closure_result, statuses in expected.items():
+            with self.subTest(closure_result=closure_result):
+                compiled = compile_package(
+                    validated(face_package(closure_result))
+                )
+                result = evaluate(compiled.program)
+                clear_status, failed_status, open_status = statuses
+
+                self.assertEqual(result.status_of(face), Status.LIVE)
+                self.assertEqual(result.status_of(blocker), Status.EXCLUDED)
+                self.assertEqual(result.status_of(clear), clear_status)
+                self.assertEqual(result.status_of(live_case), clear_status)
+                self.assertEqual(result.status_of("atom:derived@1"), clear_status)
+                self.assertEqual(result.status_of(failed), failed_status)
+                self.assertEqual(result.status_of(opened), open_status)
+                self.assertEqual(
+                    ready in compiled.program.base_live,
+                    closure_result is CheckResult.PASS,
+                )
+                self.assertEqual(
+                    ready in compiled.program.protected_open,
+                    closure_result in {CheckResult.FAIL, CheckResult.OPEN},
+                )
+
+    def test_multiple_faces_are_conjunctive_in_one_rule_case(self) -> None:
+        compiled = compile_package(validated(conjunctive_face_package()))
+        evaluation = evaluate(compiled.program)
+        rule_case = next(
+            rule
+            for rule in compiled.program.rules
+            if rule.id == "__pff__:rule-case(rule:derive@1)"
+        )
+
+        for expected_guard in (
+            "__pff__:clear(face:first@1)",
+            "__pff__:clear(face:second@1)",
+        ):
+            self.assertIn(
+                expected_guard,
+                rule_case.positive,
+                f"MISSING_FACE_GUARD:{expected_guard}",
+            )
+        self.assertEqual(
+            rule_case.positive,
+            {
+                "__pff__:cert-valid(cert:derive@1)",
+                "atom:source@1",
+                "__pff__:clear(face:first@1)",
+                "__pff__:clear(face:second@1)",
+            },
+        )
+        self.assertEqual(
+            evaluation.status_of("__pff__:clear(face:first@1)"),
+            Status.LIVE,
+        )
+        self.assertEqual(
+            evaluation.status_of("__pff__:clear(face:second@1)"),
+            Status.SUSPENDED,
+        )
+        self.assertEqual(
+            evaluation.status_of("__pff__:live-case(rule:derive@1)"),
+            Status.SUSPENDED,
+        )
+        self.assertEqual(
+            evaluation.status_of("atom:derived@1"),
+            Status.SUSPENDED,
+        )
+
+    def test_same_head_face_alternatives_remain_independent(self) -> None:
+        compiled = compile_package(validated(alternative_face_package()))
+        evaluation = evaluate(compiled.program)
+        expected_cases = {
+            literal_rule(
+                "__pff__:rule-case(rule:a-face@1)",
+                "__pff__:live-case(rule:a-face@1)",
+                positive={
+                    "__pff__:cert-valid(cert:a-face@1)",
+                    "atom:source@1",
+                    "__pff__:clear(face:a@1)",
+                },
+            ),
+            literal_rule(
+                "__pff__:rule-case(rule:z-face@1)",
+                "__pff__:live-case(rule:z-face@1)",
+                positive={
+                    "__pff__:cert-valid(cert:z-face@1)",
+                    "atom:source@1",
+                    "__pff__:clear(face:z@1)",
+                },
+            ),
+        }
+
+        self.assertEqual(
+            {
+                rule
+                for rule in compiled.program.rules
+                if str(rule.id).startswith("__pff__:rule-case(")
+            },
+            expected_cases,
+        )
+        self.assertEqual(
+            evaluation.status_of("__pff__:live-case(rule:a-face@1)"),
+            Status.LIVE,
+        )
+        self.assertEqual(
+            evaluation.status_of("__pff__:live-case(rule:z-face@1)"),
+            Status.SUSPENDED,
+        )
+        self.assertEqual(evaluation.status_of("atom:derived@1"), Status.LIVE)
+
+    def test_face_blocker_atom_composes_with_successor_rules(self) -> None:
+        compiled = compile_package(validated(face_package()))
+        original = evaluate(compiled.program)
+        blocker = "__pff__:has-open-challenge(face:frame@1)"
+        clear = "__pff__:clear(face:frame@1)"
+        live_case = "__pff__:live-case(rule:derive@1)"
+        successor_atom = "__pff__:open-challenge(challenge:future@1)"
+        successor_rule = literal_rule(
+            "__pff__:successor-face-blocker(challenge:future@1)",
+            blocker,
+            positive={successor_atom},
+        )
+
+        self.assertEqual(original.status_of(clear), Status.LIVE)
+        self.assertEqual(original.status_of("atom:derived@1"), Status.LIVE)
+        cases = (
+            ("live", {successor_atom}, set(), Status.LIVE, Status.EXCLUDED),
+            (
+                "protected-open",
+                set(),
+                {successor_atom},
+                Status.SUSPENDED,
+                Status.SUSPENDED,
+            ),
+        )
+        for label, extra_live, extra_open, blocker_status, clear_status in cases:
+            with self.subTest(label=label):
+                successor_program = GroundProgram(
+                    atoms={*compiled.program.atoms, successor_atom},
+                    rules=(*compiled.program.rules, successor_rule),
+                    base_live={*compiled.program.base_live, *extra_live},
+                    base_excluded=compiled.program.base_excluded,
+                    protected_open={
+                        *compiled.program.protected_open,
+                        *extra_open,
+                    },
+                )
+                result = evaluate(successor_program)
+
+                self.assertEqual(result.status_of(blocker), blocker_status)
+                self.assertEqual(result.status_of(clear), clear_status)
+                self.assertEqual(result.status_of(live_case), clear_status)
+                self.assertEqual(
+                    result.status_of("atom:derived@1"),
+                    clear_status,
+                )
+
 
 class IdentityDeterminismAndContraryTests(unittest.TestCase):
     def test_base_versions_order_and_metadata_do_not_change_artifacts(self) -> None:
@@ -720,6 +1141,76 @@ class IdentityDeterminismAndContraryTests(unittest.TestCase):
             self.assertIn(
                 f"__pff__:head-bridge(rule:versioned@{version})",
                 {str(rule.id) for rule in first.program.rules},
+            )
+
+    def test_face_versions_order_and_origins_are_exact(self) -> None:
+        candidate = versioned_face_package()
+        reordered = replace(
+            candidate,
+            rules=tuple(reversed(candidate.rules)),
+            faces=tuple(reversed(candidate.faces)),
+            certificates=tuple(reversed(candidate.certificates)),
+            closures=tuple(reversed(candidate.closures)),
+            header=replace(
+                candidate.header,
+                parent_package_hash="sha256:face-order",
+                metadata={"display": {"faces": [2, 1]}},
+            ),
+        )
+
+        first = compile_package(validated(candidate))
+        second = compile_package(validated(reordered))
+
+        self.assertEqual(semantic_artifacts(first), semantic_artifacts(second))
+        self.assertNotEqual(first, second)
+        cases = ((5, 2, 9, 7), (7, 3, 11, 5))
+        for face_version, rule_version, closure_version, other_face_version in cases:
+            face = f"__pff__:face(face:versioned@{face_version})"
+            blocker = (
+                "__pff__:has-open-challenge"
+                f"(face:versioned@{face_version})"
+            )
+            clear = f"__pff__:clear(face:versioned@{face_version})"
+            clear_rule = f"__pff__:clear-face(face:versioned@{face_version})"
+            rule_case = f"__pff__:rule-case(rule:versioned-face@{rule_version})"
+            live_case = f"__pff__:live-case(rule:versioned-face@{rule_version})"
+
+            self.assertIn(face, first.program.base_live)
+            self.assertIn(blocker, first.program.atoms)
+            self.assertIn(clear, first.program.atoms)
+            self.assertIn(clear_rule, {str(rule.id) for rule in first.program.rules})
+            for kind, artifact, role in (
+                (GroundArtifactKind.ATOM, face, CompilationRole.FACE),
+                (GroundArtifactKind.ATOM, blocker, CompilationRole.HAS_OPEN_CHALLENGE),
+                (GroundArtifactKind.ATOM, clear, CompilationRole.CLEAR),
+                (GroundArtifactKind.RULE, clear_rule, CompilationRole.CLEAR_FACE),
+            ):
+                self.assertEqual(
+                    first.origin_for(kind, artifact),
+                    literal_origin(
+                        kind,
+                        artifact,
+                        role,
+                        RecordKind.FACE,
+                        "face:versioned",
+                        face_version,
+                    ),
+                )
+            compiled_clear = next(
+                rule for rule in first.program.rules if rule.id == clear_rule
+            )
+            self.assertIn(
+                f"__pff__:closure-ready(closure:versioned-face@{closure_version})",
+                compiled_clear.positive,
+            )
+            compiled_case = next(
+                rule for rule in first.program.rules if rule.id == rule_case
+            )
+            self.assertEqual(compiled_case.head, live_case)
+            self.assertIn(clear, compiled_case.positive)
+            self.assertNotIn(
+                f"__pff__:clear(face:versioned@{other_face_version})",
+                compiled_case.positive,
             )
 
     def test_delimiter_heavy_and_unicode_ids_use_the_frozen_literal_grammar(self) -> None:
@@ -860,36 +1351,65 @@ class CapabilityAndBoundaryTests(unittest.TestCase):
                 with self.assertRaises(TypeError):
                     compile_package(candidate)  # type: ignore[arg-type]
 
-    def test_pending_records_fail_once_per_record_in_canonical_kind_order(self) -> None:
+    def test_faces_are_accepted_while_pending_records_fail_per_record(self) -> None:
         candidate = linked_valid_package()
-        original_face = candidate.faces[0]
-        second_face = replace(
-            original_face,
-            id="face:second",
-            blocker_closure=ref("closure:second-blockers"),
+        original_challenge = candidate.challenges[0]
+        original_discharge = candidate.discharges[0]
+        second_challenge = ChallengeRecord(
+            id="challenge:a-second",
+            version=1,
+            kind="undercut",
+            target_kind=RecordKind.FACE,
+            target=candidate.faces[0].ref,
+            certificate=ref("cert:challenge-second"),
+            discharge_closure=ref("closure:discharges-second"),
         )
-        second_blocker_closure = ClosureRecord(
-            id="closure:second-blockers",
+        second_discharge = DischargeRecord(
+            id="discharge:z-second",
+            version=1,
+            challenge=second_challenge.ref,
+            kind="repair",
+            certificate=ref("cert:discharge-second"),
+        )
+        blocker_closure = replace(
+            candidate.closures[0],
+            members=(original_challenge.ref, second_challenge.ref),
+        )
+        second_discharge_closure = ClosureRecord(
+            id="closure:discharges-second",
             version=1,
             checker="materialised-selector/v1",
             result=CheckResult.PASS,
             cut_id="cut:1",
             frame="frame:1",
             selector=Selector(
-                record_type=RecordKind.CHALLENGE,
-                where={"target": second_face.ref},
+                record_type=RecordKind.DISCHARGE,
+                where={"challenge": second_challenge.ref},
             ),
+            members=(second_discharge.ref,),
         )
         candidate = replace(
             candidate,
-            rules=(
-                replace(
-                    candidate.rules[0],
-                    faces={original_face.ref, second_face.ref},
+            challenges=(original_challenge, second_challenge),
+            discharges=(second_discharge, original_discharge),
+            certificates=(
+                *candidate.certificates,
+                certificate(
+                    "cert:challenge-second",
+                    "challenge-witness/v1",
+                    second_challenge.ref,
+                ),
+                certificate(
+                    "cert:discharge-second",
+                    "discharge-witness/v1",
+                    second_discharge.ref,
                 ),
             ),
-            faces=(second_face, original_face),
-            closures=(*candidate.closures, second_blocker_closure),
+            closures=(
+                second_discharge_closure,
+                candidate.closures[1],
+                blocker_closure,
+            ),
         )
         source = validate_package(candidate, catalog())
 
@@ -901,29 +1421,29 @@ class CapabilityAndBoundaryTests(unittest.TestCase):
             (
                 CompilationIssue(
                     code=CompilationCode.UNSUPPORTED_RECORD_KIND,
-                    record_kind=RecordKind.FACE,
-                    ref=original_face.ref,
-                ),
-                CompilationIssue(
-                    code=CompilationCode.UNSUPPORTED_RECORD_KIND,
-                    record_kind=RecordKind.FACE,
-                    ref=second_face.ref,
+                    record_kind=RecordKind.CHALLENGE,
+                    ref=second_challenge.ref,
                 ),
                 CompilationIssue(
                     code=CompilationCode.UNSUPPORTED_RECORD_KIND,
                     record_kind=RecordKind.CHALLENGE,
-                    ref=candidate.challenges[0].ref,
+                    ref=original_challenge.ref,
                 ),
                 CompilationIssue(
                     code=CompilationCode.UNSUPPORTED_RECORD_KIND,
                     record_kind=RecordKind.DISCHARGE,
-                    ref=candidate.discharges[0].ref,
+                    ref=original_discharge.ref,
+                ),
+                CompilationIssue(
+                    code=CompilationCode.UNSUPPORTED_RECORD_KIND,
+                    record_kind=RecordKind.DISCHARGE,
+                    ref=second_discharge.ref,
                 ),
             ),
         )
 
     def test_compiler_does_not_call_validation_checker_or_evaluator(self) -> None:
-        source = validated(minimal_valid_package())
+        source = validated(face_package())
         ground_evaluate_module = importlib.import_module("poietics.ground.evaluate")
 
         with (
@@ -981,6 +1501,7 @@ class CapabilityAndBoundaryTests(unittest.TestCase):
                 "CheckResult",
                 "ClosureRecord",
                 "ContraryRecord",
+                "FaceRecord",
                 "RecordKind",
                 "RecordRef",
                 "RuleRecord",

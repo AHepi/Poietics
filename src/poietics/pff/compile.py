@@ -7,9 +7,9 @@ program plus a deterministic source map.  It does not execute checkers,
 providers, parsers, or the ground evaluator.
 
 The current bounded slice implements certificate and closure gates, source
-base transfer, explicit contrary carriage, and face-free user rules.  Faces,
-challenges, and discharges fail closed with typed feature diagnostics until
-their lowering rules are admitted by a later compiler slice.
+base transfer, explicit contrary carriage, face clearance, and face-guarded
+user rules.  Challenges and discharges fail closed with typed feature
+diagnostics until their lowering rules are admitted by a later compiler slice.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from .model import (
     CheckResult,
     ClosureRecord,
     ContraryRecord,
+    FaceRecord,
     RecordKind,
     RecordRef,
     RuleRecord,
@@ -50,9 +51,13 @@ class CompilationRole(StrEnum):
     CLOSURE_READY = "closure-ready"
     CLOSURE_FAILED = "closure-failed"
     CLOSURE_OPEN = "closure-open"
+    FACE = "face"
+    HAS_OPEN_CHALLENGE = "has-open-challenge"
+    CLEAR = "clear"
     LIVE_CASE = "live-case"
     RULE_CASE = "rule-case"
     HEAD_BRIDGE = "head-bridge"
+    CLEAR_FACE = "clear-face"
 
 
 class CompilationCode(StrEnum):
@@ -69,14 +74,20 @@ _ATOM_ROLES = frozenset(
         CompilationRole.CLOSURE_READY,
         CompilationRole.CLOSURE_FAILED,
         CompilationRole.CLOSURE_OPEN,
+        CompilationRole.FACE,
+        CompilationRole.HAS_OPEN_CHALLENGE,
+        CompilationRole.CLEAR,
         CompilationRole.LIVE_CASE,
     }
 )
 _RULE_ROLES = frozenset(
-    {CompilationRole.RULE_CASE, CompilationRole.HEAD_BRIDGE}
+    {
+        CompilationRole.RULE_CASE,
+        CompilationRole.HEAD_BRIDGE,
+        CompilationRole.CLEAR_FACE,
+    }
 )
 _PENDING_KINDS = (
-    RecordKind.FACE,
     RecordKind.CHALLENGE,
     RecordKind.DISCHARGE,
 )
@@ -399,6 +410,7 @@ class _CompilationBuilder:
         rule: GroundRule,
         *,
         role: CompilationRole,
+        source_kind: RecordKind,
         source_ref: RecordRef,
     ) -> None:
         if rule.id in self.rule_ids:
@@ -409,7 +421,7 @@ class _CompilationBuilder:
             artifact_kind=GroundArtifactKind.RULE,
             artifact_ref=str(rule.id),
             role=role,
-            sources=(self._source(RecordKind.RULE, source_ref),),
+            sources=(self._source(source_kind, source_ref),),
         )
         self.origins[(GroundArtifactKind.RULE, str(rule.id))] = origin
 
@@ -560,6 +572,50 @@ def _compile_contraries(builder: _CompilationBuilder) -> None:
         builder.add_contrary(cast(ContraryRecord, raw_record))
 
 
+def _compile_faces(builder: _CompilationBuilder) -> None:
+    for raw_record in builder.source.records(RecordKind.FACE):
+        record = cast(FaceRecord, raw_record)
+        face = _generated_atom(CompilationRole.FACE, record.ref)
+        has_open_challenge = _generated_atom(
+            CompilationRole.HAS_OPEN_CHALLENGE,
+            record.ref,
+        )
+        clear = _generated_atom(CompilationRole.CLEAR, record.ref)
+        for atom, role in (
+            (face, CompilationRole.FACE),
+            (has_open_challenge, CompilationRole.HAS_OPEN_CHALLENGE),
+            (clear, CompilationRole.CLEAR),
+        ):
+            builder.add_atom(
+                atom,
+                role=role,
+                source_kind=RecordKind.FACE,
+                source_ref=record.ref,
+            )
+        builder.mark_live(face)
+
+        clear_face = GroundRule(
+            id=_generated_rule(CompilationRole.CLEAR_FACE, record.ref),
+            head=clear,
+            positive=frozenset(
+                {
+                    face,
+                    _generated_atom(
+                        CompilationRole.CLOSURE_READY,
+                        record.blocker_closure,
+                    ),
+                }
+            ),
+            negative=frozenset({has_open_challenge}),
+        )
+        builder.add_rule(
+            clear_face,
+            role=CompilationRole.CLEAR_FACE,
+            source_kind=RecordKind.FACE,
+            source_ref=record.ref,
+        )
+
+
 def _compile_rules(builder: _CompilationBuilder) -> None:
     for raw_record in builder.source.records(RecordKind.RULE):
         record = cast(RuleRecord, raw_record)
@@ -574,6 +630,10 @@ def _compile_rules(builder: _CompilationBuilder) -> None:
         positive = {
             _generated_atom(CompilationRole.CERT_VALID, record.certificate),
             *(_source_atom(ref) for ref in record.positive),
+            *(
+                _generated_atom(CompilationRole.CLEAR, ref)
+                for ref in record.faces
+            ),
             *(
                 _generated_atom(CompilationRole.CLOSURE_READY, literal.closure)
                 for literal in record.negative
@@ -590,6 +650,7 @@ def _compile_rules(builder: _CompilationBuilder) -> None:
         builder.add_rule(
             case_rule,
             role=CompilationRole.RULE_CASE,
+            source_kind=RecordKind.RULE,
             source_ref=record.ref,
         )
 
@@ -601,6 +662,7 @@ def _compile_rules(builder: _CompilationBuilder) -> None:
         builder.add_rule(
             head_bridge,
             role=CompilationRole.HEAD_BRIDGE,
+            source_kind=RecordKind.RULE,
             source_ref=record.ref,
         )
 
@@ -623,6 +685,7 @@ def compile_package(source: ValidatedPackage) -> Compilation:
     _compile_source_atoms(builder)
     _compile_certificates(builder)
     _compile_closures(builder)
+    _compile_faces(builder)
     _compile_contraries(builder)
     _compile_rules(builder)
     return builder.build()
