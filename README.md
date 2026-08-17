@@ -7,7 +7,8 @@ evaluator over a finite ground program.
 The implemented core now includes immutable generation capture, a pure Ollama
 adapter over an injected byte transport, an optional concrete standard-library
 Ollama HTTP transport, strict provider-neutral draft extraction, immutable
-package candidates, an exact code-owned predicate
+two-phase draft binding with retained provenance, immutable package candidates,
+an exact code-owned predicate
 registry, deterministic validation, opaque ground atom references,
 deterministic certificate and closure gate compilation, deterministic face
 clearance and face-guarded rule compilation, generic challenge and discharge
@@ -25,6 +26,7 @@ support, confidence, or probability judgements.
 | `poietics.generation.ollama` | Build exact non-streaming `/api/generate` request bytes for a code-owned local or cloud endpoint, invoke one injected byte transport exactly once without retry, strictly validate the response, and return a `GenerationEnvelope` | Transport selection, credential discovery, concrete HTTP policy, provider SDKs, automatic extraction, package binding, and evaluation |
 | `poietics.generation.ollama_http` | Optionally perform one standard-library HTTP exchange against the exact local or cloud Ollama endpoint, inject an explicitly supplied cloud key, bound the response read, and translate recognized network failures | Environment or file-based key loading, retries, redirects, pooling, provider JSON semantics, capture, extraction, package binding, and evaluation |
 | `poietics.generation.extract` | Strictly extract one delimited `pff-draft/0.1` JSON object from retained prose and return typed deterministic diagnostics | Heuristic prose interpretation, repair, package binding, checker execution, and provider calls |
+| `poietics.binding` | Plan explicit code-owned draft-to-record identities and checker routes, then materialize one provenance-bearing candidate package from a complete set of structurally bound authority attestations | Policy invention, evidence authentication or checker execution, extraction, validation, compilation, evaluation, provider calls, and I/O |
 | `poietics.pff.model` | Deeply immutable typed package candidates and exact references | Parsing, registry meaning, semantic status, and compilation |
 | `poietics.pff.registry` | Exact immutable predicate, checker-shape, and policy contracts | Provider calls, checker execution, mutable registration, and manifest loading |
 | `poietics.pff.local_checkers` | Pure recomputation of explicitly code-owned package-local checker contracts | External evidence, I/O, provider calls, compilation, and evaluation |
@@ -40,8 +42,12 @@ the optional concrete HTTP transport depends on the adapter types, while the
 adapter and package initializer do not import it. The adapter returns an
 immutable `GenerationEnvelope`, and only a later explicit call to
 `extract_draft` may interpret its assistant bytes as an untrusted
-`DraftPackage`. A future trusted binder will create the immutable `Package`.
-Validation binds that package to one exact registry and mints a
+`DraftPackage`. The top-level binder accepts only the factory-minted
+`ExtractedDraft`, requires a complete explicit identity-and-route policy,
+freezes every evidence task before accepting results, and returns a
+`BoundPackage` sidecar around the candidate `Package`. It does not authenticate
+attestations or call validation. A later explicit `validate_package` call binds
+that package to one exact registry and mints a
 `ValidatedPackage`; the compiler creates a `Compilation` containing a
 `GroundProgram`; the ground evaluator derives an `Evaluation`. Rule indexes and
 statuses are always recomputed and are never stored as authority.
@@ -149,9 +155,15 @@ heuristic repair.
 
 The first draft schema deliberately permits only nonprimitive atom proposals,
 positive rule alternatives, and certificate evidence requests. A separate
-trusted binder must later select registry/checker policy, obtain authenticated
-evidence, and materialize the immutable `Package`; an LLM adapter cannot
-directly author an authoritative package or call validation as though its
+code-owned `DraftBindingPolicy` maps every local atom and rule handle to an
+authoritative package reference and maps every evidence request to an explicit
+certificate, checker, and expected authority. `plan_draft_binding` freezes
+those choices in immutable tasks. `finalize_draft_binding` requires one exact
+structurally matching `EvidenceAttestation` per task and materializes the
+candidate package with all generated atoms nonprimitive and the source base
+empty. The attestation type records an authority assertion; this layer does not
+authenticate it. LLM text cannot select these routes, supply an attestation,
+author an authoritative package identity, or call validation as though its
 output were trusted.
 
 | Stage | Contract |
@@ -159,7 +171,7 @@ output were trusted.
 | Ollama adapter | Serialize the caller-supplied prompt for the selected local/cloud endpoint, make one injected transport call with no retry, strictly validate its response, and return a fresh immutable `GenerationEnvelope` |
 | Optional HTTP transport | Send the adapter's exact body in one local HTTP or cloud HTTPS exchange, add an explicit cloud Bearer key without persisting it, and return one bounded status/body record |
 | Capture and extraction boundary | Retain exact prompt and response bytes plus identities, parameters, hashes, and lineage; strictly extract nonprimitive atoms, positive rules, and evidence requests |
-| Trusted evidence binder | Select permitted checker contracts, import or execute authenticated evidence, recompute local closures, and materialize the immutable `Package` |
+| Draft binder | Apply an explicit code-owned identity/routing policy, freeze exact evidence tasks, require a complete structurally bound attestation set, and return a provenance-bearing candidate `BoundPackage` |
 | Package validator | Reject malformed, unresolved, unknown, or type-invalid bound packages without assigning semantic status |
 | Compiler and ground evaluator | Lower valid candidates and derive the complete partition through the one deterministic engine path |
 | Discernment loop | Return typed blockers and open dependencies to the controller as context for a later LLM generation turn |
@@ -175,8 +187,9 @@ conjectural variation. The concrete transport is optional, has no provider SDK
 or credential loader, and stores no key in generation evidence. Its tests use
 patched connection fakes only: qualification performs no socket, DNS, TLS, or
 live Ollama call and does not use a deployment key. Automatic credential
-discovery remains outside this slice. The trusted draft-to-package binder is
-the next separately bounded layer.
+discovery remains outside this slice. The draft-to-package binder is
+provider-free and explicit; evidence authentication and checker execution are
+the next separately bounded layers.
 
 ## Verification
 
@@ -189,6 +202,6 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -B -m unittest discover -s test
 Remaining semantic freezes include closure-safe rule-target blocking, exact
 revocation selection, typed currentness targets, the retained defect/problem
 lifecycle, and compiler semantics for registry extension kinds. The provider
-credential-loading policy, trusted draft-to-package binder, canonical package
-bytes, explanation, replay controller, CLI, and empirical-pack work remain
-separate later milestones.
+credential-loading policy, evidence authenticator/checker runner, canonical
+package bytes, explanation, replay controller, CLI, and empirical-pack work
+remain separate later milestones.
