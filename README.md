@@ -5,8 +5,9 @@ Fixpoint: a typed admission boundary followed by a deterministic well-founded
 evaluator over a finite ground program.
 
 The implemented core now includes immutable generation capture, a pure Ollama
-adapter over an injected byte transport, strict provider-neutral draft
-extraction, immutable package candidates, an exact code-owned predicate
+adapter over an injected byte transport, an optional concrete standard-library
+Ollama HTTP transport, strict provider-neutral draft extraction, immutable
+package candidates, an exact code-owned predicate
 registry, deterministic validation, opaque ground atom references,
 deterministic certificate and closure gate compilation, deterministic face
 clearance and face-guarded rule compilation, generic challenge and discharge
@@ -21,7 +22,8 @@ support, confidence, or probability judgements.
 | Layer | Current responsibility | Explicitly outside the layer |
 |---|---|---|
 | `poietics.generation.model` | Immutable prompt/response capture, attempt lineage, and untrusted draft records | Provider calls, prompt construction, package authority, checking, and evaluation |
-| `poietics.generation.ollama` | Build exact non-streaming `/api/generate` request bytes for a code-owned local or cloud endpoint, invoke one injected byte transport exactly once without retry, strictly validate the response, and return a `GenerationEnvelope` | Concrete HTTP, authentication or API-key loading, provider SDKs, automatic extraction, package binding, and evaluation |
+| `poietics.generation.ollama` | Build exact non-streaming `/api/generate` request bytes for a code-owned local or cloud endpoint, invoke one injected byte transport exactly once without retry, strictly validate the response, and return a `GenerationEnvelope` | Transport selection, credential discovery, concrete HTTP policy, provider SDKs, automatic extraction, package binding, and evaluation |
+| `poietics.generation.ollama_http` | Optionally perform one standard-library HTTP exchange against the exact local or cloud Ollama endpoint, inject an explicitly supplied cloud key, bound the response read, and translate recognized network failures | Environment or file-based key loading, retries, redirects, pooling, provider JSON semantics, capture, extraction, package binding, and evaluation |
 | `poietics.generation.extract` | Strictly extract one delimited `pff-draft/0.1` JSON object from retained prose and return typed deterministic diagnostics | Heuristic prose interpretation, repair, package binding, checker execution, and provider calls |
 | `poietics.pff.model` | Deeply immutable typed package candidates and exact references | Parsing, registry meaning, semantic status, and compilation |
 | `poietics.pff.registry` | Exact immutable predicate, checker-shape, and policy contracts | Provider calls, checker execution, mutable registration, and manifest loading |
@@ -32,9 +34,11 @@ support, confidence, or probability judgements.
 | `poietics.ground.evaluate` | One authoritative fixed-point path | Domain interpretation, provenance, replay, and incremental evaluation |
 | Future explanation layer | Combine source maps and contraries with an `Evaluation` | Persisting or inventing verdicts |
 
-The dependency direction is intentionally one-way: the Ollama adapter can use
-only a caller-supplied byte transport and the provider-neutral capture model.
-It returns an immutable `GenerationEnvelope`, and only a later explicit call to
+The dependency direction is intentionally one-way: the Ollama adapter uses
+only a caller-supplied byte transport and the provider-neutral capture model;
+the optional concrete HTTP transport depends on the adapter types, while the
+adapter and package initializer do not import it. The adapter returns an
+immutable `GenerationEnvelope`, and only a later explicit call to
 `extract_draft` may interpret its assistant bytes as an untrusted
 `DraftPackage`. A future trusted binder will create the immutable `Package`.
 Validation binds that package to one exact registry and mints a
@@ -124,6 +128,18 @@ returning a `GenerationEnvelope`. Only the decoded Ollama `response` string
 crosses the capture boundary as assistant bytes; the HTTP wrapper and unknown
 provider fields do not.
 
+`poietics.generation.ollama_http.OllamaHttpTransport` is the optional concrete
+transport for that seam. It uses a fresh standard-library `HTTPConnection` to
+`localhost:11434` for local calls or `HTTPSConnection` to `ollama.com:443` for
+cloud calls, then makes exactly one `POST /api/generate` exchange. It follows
+no redirect, performs no retry, and reads at most 4,194,305 response bytes so
+the adapter can enforce its 4,194,304-byte limit deterministically. Local calls
+never send authorization. Cloud calls require a key passed explicitly as
+`cloud_api_key`; the transport does not read `OLLAMA_API_KEY`, another
+environment variable, a file, or a keyring. It never persists or logs that key,
+nor places it in generation capture, response records, diagnostics, exception
+text, or a generated representation of the transport.
+
 The provider-neutral extractor then recognizes one `pff-draft/0.1` JSON object
 between exact marker lines. Arbitrary LLM prose before and after that block is
 captured for replay but remains semantically inert until the caller explicitly
@@ -141,6 +157,7 @@ output were trusted.
 | Stage | Contract |
 |---|---|
 | Ollama adapter | Serialize the caller-supplied prompt for the selected local/cloud endpoint, make one injected transport call with no retry, strictly validate its response, and return a fresh immutable `GenerationEnvelope` |
+| Optional HTTP transport | Send the adapter's exact body in one local HTTP or cloud HTTPS exchange, add an explicit cloud Bearer key without persisting it, and return one bounded status/body record |
 | Capture and extraction boundary | Retain exact prompt and response bytes plus identities, parameters, hashes, and lineage; strictly extract nonprimitive atoms, positive rules, and evidence requests |
 | Trusted evidence binder | Select permitted checker contracts, import or execute authenticated evidence, recompute local closures, and materialize the immutable `Package` |
 | Package validator | Reject malformed, unresolved, unknown, or type-invalid bound packages without assigning semantic status |
@@ -154,10 +171,12 @@ replay consumes the same captured bytes through the same parser without calling
 an LLM. A repair or fresh model call creates a new linked generation attempt
 rather than mutating the captured response or prior draft. External checkers
 remain separate: they supply typed evidence results, while the LLM supplies
-conjectural variation. The slice has no concrete Ollama HTTP client,
-authentication or API-key loader, provider SDK or live-provider dependency, and
-stores no key or credential. Those deployment concerns and the trusted
-draft-to-package binder remain future, separately bounded layers.
+conjectural variation. The concrete transport is optional, has no provider SDK
+or credential loader, and stores no key in generation evidence. Its tests use
+patched connection fakes only: qualification performs no socket, DNS, TLS, or
+live Ollama call and does not use a deployment key. Automatic credential
+discovery remains outside this slice. The trusted draft-to-package binder is
+the next separately bounded layer.
 
 ## Verification
 
@@ -170,6 +189,6 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -B -m unittest discover -s test
 Remaining semantic freezes include closure-safe rule-target blocking, exact
 revocation selection, typed currentness targets, the retained defect/problem
 lifecycle, and compiler semantics for registry extension kinds. The provider
-HTTP/authentication transport and key loading, trusted draft-to-package binder,
-canonical package bytes, explanation, replay controller, CLI, and empirical-pack
-work remain separate later milestones.
+credential-loading policy, trusted draft-to-package binder, canonical package
+bytes, explanation, replay controller, CLI, and empirical-pack work remain
+separate later milestones.
