@@ -4,7 +4,8 @@ Poietics is being built around the narrow waist of the Poietic Faceted
 Fixpoint: a typed admission boundary followed by a deterministic well-founded
 evaluator over a finite ground program.
 
-The implemented core now includes immutable package candidates, an exact
+The implemented core now includes immutable generation capture, strict
+provider-neutral draft extraction, immutable package candidates, an exact
 code-owned predicate registry, deterministic validation, opaque ground atom
 references, deterministic certificate and closure gate compilation,
 deterministic face clearance and face-guarded rule compilation, generic
@@ -18,6 +19,8 @@ truth, acceptance, support, confidence, or probability judgements.
 
 | Layer | Current responsibility | Explicitly outside the layer |
 |---|---|---|
+| `poietics.generation.model` | Immutable prompt/response capture, attempt lineage, and untrusted draft records | Provider calls, prompt construction, package authority, checking, and evaluation |
+| `poietics.generation.extract` | Strictly extract one delimited `pff-draft/0.1` JSON object from retained prose and return typed deterministic diagnostics | Heuristic prose interpretation, repair, package binding, checker execution, and provider calls |
 | `poietics.pff.model` | Deeply immutable typed package candidates and exact references | Parsing, registry meaning, semantic status, and compilation |
 | `poietics.pff.registry` | Exact immutable predicate, checker-shape, and policy contracts | Provider calls, checker execution, mutable registration, and manifest loading |
 | `poietics.pff.local_checkers` | Pure recomputation of explicitly code-owned package-local checker contracts | External evidence, I/O, provider calls, compilation, and evaluation |
@@ -28,12 +31,12 @@ truth, acceptance, support, confidence, or probability judgements.
 | Future explanation layer | Combine source maps and contraries with an `Evaluation` | Persisting or inventing verdicts |
 
 The dependency direction is intentionally one-way: an upstream producer may
-supply untrusted candidate material; at the future generation boundary, a
-trusted binder will create the immutable `Package`. Validation binds that
-package to one exact registry and mints a `ValidatedPackage`; the compiler
-creates a `Compilation` containing a `GroundProgram`; the ground evaluator
-derives an `Evaluation`. Rule indexes and statuses are always recomputed and are
-never stored as authority.
+supply untrusted candidate material; capture retains its exact bytes and strict
+extraction may mint only a `DraftPackage`. A future trusted binder will create
+the immutable `Package`. Validation binds that package to one exact registry
+and mints a `ValidatedPackage`; the compiler creates a `Compilation` containing
+a `GroundProgram`; the ground evaluator derives an `Evaluation`. Rule indexes
+and statuses are always recomputed and are never stored as authority.
 
 ## Compiler boundary
 
@@ -108,17 +111,25 @@ package record kinds.
 
 ## Generator placement
 
-The intended conjecture generator for this system is an LLM, but the exact
-provider-neutral generation protocol remains a future, provisional layer. It
-sits above the semantic core and emits untrusted draft records and typed
-evidence requests. A separate trusted binder materializes the immutable
-`Package`; an LLM adapter cannot directly author an authoritative package or
-call validation as though its output were trusted.
+The intended conjecture generator for this system is an LLM. The implemented
+provider-neutral boundary captures the exact prompt, public request metadata,
+raw response bytes, provider/model identity, and attempt lineage. It then
+strictly extracts one `pff-draft/0.1` JSON object between exact marker lines.
+Arbitrary prose before and after that block is preserved for replay but remains
+semantically inert; missing, duplicated, malformed, oversized, or unresolved
+blocks fail with deterministic typed diagnostics rather than heuristic repair.
+
+The first draft schema deliberately permits only nonprimitive atom proposals,
+positive rule alternatives, and certificate evidence requests. A separate
+trusted binder must later select registry/checker policy, obtain authenticated
+evidence, and materialize the immutable `Package`; an LLM adapter cannot
+directly author an authoritative package or call validation as though its
+output were trusted.
 
 | Stage | Contract |
 |---|---|
-| Future provider-neutral adapter | Ask an LLM for candidate atoms, rule alternatives, faces, contraries, challenges, discharges, exact successor versions, or revisions in an untrusted draft |
-| Capture and extraction boundary | Retain the prompt, model identity, parameters, raw response bytes or an immutable retrievable reference plus hash, and the extracted draft before semantic use |
+| Future provider adapter | Ask an LLM for a marker-delimited draft and capture each call as a fresh immutable attempt; no provider dependency is present in the semantic core |
+| Capture and extraction boundary | Retain exact prompt and response bytes plus identities, parameters, hashes, and lineage; strictly extract nonprimitive atoms, positive rules, and evidence requests |
 | Trusted evidence binder | Select permitted checker contracts, import or execute authenticated evidence, recompute local closures, and materialize the immutable `Package` |
 | Package validator | Reject malformed, unresolved, unknown, or type-invalid bound packages without assigning semantic status |
 | Compiler and ground evaluator | Lower valid candidates and derive the complete partition through the one deterministic engine path |
@@ -126,11 +137,12 @@ call validation as though its output were trusted.
 
 The draft cannot carry authoritative base membership, registry contracts,
 certificate or closure outcomes, semantic status, or compiler-generated
-`__pff__:` records. Replay consumes captured inputs and bound evidence without
-calling an LLM. A repair or fresh model call creates a new linked generation
-attempt rather than mutating the captured response or prior draft. External
-checkers remain separate: they supply typed evidence results, while the LLM
-supplies conjectural variation.
+`__pff__:` records. It is not accepted by `validate_package`. Re-extraction for
+replay consumes the same captured bytes through the same parser without calling
+an LLM. A repair or fresh model call creates a new linked generation attempt
+rather than mutating the captured response or prior draft. External checkers
+remain separate: they supply typed evidence results, while the LLM supplies
+conjectural variation.
 
 ## Verification
 
@@ -142,6 +154,7 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -B -m unittest discover -s test
 
 Remaining semantic freezes include closure-safe rule-target blocking, exact
 revocation selection, typed currentness targets, the retained defect/problem
-lifecycle, and compiler semantics for registry extension kinds. The provisional
-generator/provider protocol, canonical package bytes, explanation, replay, CLI,
-and empirical-pack work remain separate later milestones.
+lifecycle, and compiler semantics for registry extension kinds. The provider
+adapter, trusted draft-to-package binder, canonical package bytes, explanation,
+replay controller, CLI, and empirical-pack work remain separate later
+milestones.
