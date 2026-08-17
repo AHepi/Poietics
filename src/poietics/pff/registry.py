@@ -867,6 +867,7 @@ class ChallengeTargetContract:
 
     challenge_kind: str
     allowed_target_kinds: frozenset[RecordKind]
+    required_face_kind: str | None = None
 
     def __post_init__(self) -> None:
         _require_id(self.challenge_kind, location="challenge_target.challenge_kind")
@@ -875,6 +876,16 @@ class ChallengeTargetContract:
             location=f"challenge_target:{self.challenge_kind}.allowed_target_kinds",
             member_type=RecordKind,
         )
+        required_location = (
+            f"challenge_target:{self.challenge_kind}.required_face_kind"
+        )
+        if self.required_face_kind is not None:
+            _require_id(self.required_face_kind, location=required_location)
+            if allowed != frozenset({RecordKind.FACE}):
+                _fail(
+                    RegistryDefinitionErrorCode.INCOHERENT_CONTRACT,
+                    location=required_location,
+                )
         if not allowed or not allowed <= {
             RecordKind.ATOM,
             RecordKind.RULE,
@@ -923,15 +934,27 @@ _BLOCKING_TARGET_KINDS = frozenset({RecordKind.RULE, RecordKind.FACE})
 _GENERAL_TARGET_KINDS = frozenset(
     {RecordKind.ATOM, RecordKind.RULE, RecordKind.FACE}
 )
+_REQUIRED_FACE_KIND_BY_CHALLENGE: Mapping[str, str] = MappingProxyType(
+    {
+        "localisation_gap": "localisation",
+        "recovery_gap": "recovery",
+        "closure_gap": "closure",
+    }
+)
 
 PFF_V01_CHALLENGE_TARGETS = tuple(
     ChallengeTargetContract(
         challenge_kind=challenge_kind,
         allowed_target_kinds=(
-            _GENERAL_TARGET_KINDS
-            if challenge_kind in {"rebut", "defect"}
-            else _BLOCKING_TARGET_KINDS
+            frozenset({RecordKind.FACE})
+            if challenge_kind in _REQUIRED_FACE_KIND_BY_CHALLENGE
+            else (
+                _GENERAL_TARGET_KINDS
+                if challenge_kind in {"rebut", "defect"}
+                else _BLOCKING_TARGET_KINDS
+            )
         ),
+        required_face_kind=_REQUIRED_FACE_KIND_BY_CHALLENGE.get(challenge_kind),
     )
     for challenge_kind in sorted(PFF_V01_CHALLENGE_KINDS)
 )
@@ -1204,6 +1227,18 @@ class PredicateRegistry:
                 location=f"registry:{self.registry_id}.challenge_target_contracts",
                 identifiers=set(target_contracts) ^ self.known_challenge_kinds,
             )
+        unknown_required_face_kinds = {
+            contract.required_face_kind
+            for contract in target_contracts.values()
+            if contract.required_face_kind is not None
+            and contract.required_face_kind not in self.known_face_kinds
+        }
+        if unknown_required_face_kinds:
+            _fail(
+                RegistryDefinitionErrorCode.UNKNOWN_FACE_KIND,
+                location=f"registry:{self.registry_id}.challenge_target_contracts",
+                identifiers=unknown_required_face_kinds,
+            )
         core_targets = {
             item.challenge_kind: item for item in PFF_V01_CHALLENGE_TARGETS
         }
@@ -1211,8 +1246,12 @@ class PredicateRegistry:
             challenge_kind
             for challenge_kind, contract in target_contracts.items()
             if challenge_kind in core_targets
-            and not contract.allowed_target_kinds
-            <= core_targets[challenge_kind].allowed_target_kinds
+            and (
+                not contract.allowed_target_kinds
+                <= core_targets[challenge_kind].allowed_target_kinds
+                or contract.required_face_kind
+                != core_targets[challenge_kind].required_face_kind
+            )
         }
         if redefined_core_targets:
             _fail(
@@ -1282,12 +1321,17 @@ class PredicateRegistry:
         self,
         challenge_kind: str,
     ) -> frozenset[RecordKind]:
-        item = self._lookup(
+        return self.challenge_target_contract(challenge_kind).allowed_target_kinds
+
+    def challenge_target_contract(
+        self,
+        challenge_kind: str,
+    ) -> ChallengeTargetContract:
+        return self._lookup(
             self.challenge_target_contracts,
             id_attribute="challenge_kind",
             identifier=challenge_kind,
-        )
-        return item.allowed_target_kinds  # type: ignore[union-attr]
+        )  # type: ignore[return-value]
 
     def is_discharge_compatible(
         self,

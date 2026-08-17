@@ -88,8 +88,10 @@ class ValidationCode(StrEnum):
     CLOSURE_ROLE_MISMATCH = "closure_role_mismatch"
     UNKNOWN_CHALLENGE_KIND = "unknown_challenge_kind"
     CHALLENGE_TARGET_KIND = "challenge_target_kind"
+    CHALLENGE_TARGET_FACE_KIND = "challenge_target_face_kind"
     CHALLENGE_FORBIDDEN = "challenge_forbidden"
     REBUT_CONTRARY_REQUIRED = "rebut_contrary_required"
+    PRIMITIVE_EFFECT_HEAD = "primitive_effect_head"
     DEFECT_PROBLEM_FACE_REQUIRED = "defect_problem_face_required"
     UNKNOWN_DISCHARGE_KIND = "unknown_discharge_kind"
     BASE_OVERLAP = "base_overlap"
@@ -1003,12 +1005,15 @@ class _Validator:
                     refs=(challenge.ref,),
                     details=(challenge.kind,),
                 )
-            allowed_targets = (
-                self.registry.allowed_challenge_target_kinds(challenge.kind)
+            target_contract = (
+                self.registry.challenge_target_contract(challenge.kind)
                 if self.registry is not None and known_kind
-                else frozenset(
-                    {RecordKind.ATOM, RecordKind.RULE, RecordKind.FACE}
-                )
+                else None
+            )
+            allowed_targets = (
+                target_contract.allowed_target_kinds
+                if target_contract is not None
+                else frozenset({RecordKind.ATOM, RecordKind.RULE, RecordKind.FACE})
             )
             if challenge.target_kind not in allowed_targets:
                 self._add(
@@ -1033,6 +1038,24 @@ class _Validator:
                         ),
                     )
                     target = None
+                elif (
+                    target_contract is not None
+                    and target_contract.required_face_kind is not None
+                    and target is not None
+                    and target.kind is RecordKind.FACE
+                ):
+                    face = cast(FaceRecord, target.record)
+                    if face.kind != target_contract.required_face_kind:
+                        self._add(
+                            ValidationPhase.BINDINGS,
+                            ValidationCode.CHALLENGE_TARGET_FACE_KIND,
+                            f"{path}.target",
+                            refs=(challenge.ref, face.ref),
+                            details=(
+                                f"actual:{face.kind}",
+                                f"expected:{target_contract.required_face_kind}",
+                            ),
+                        )
             challenge_certificate = cast(
                 CertificateRecord | None,
                 self._resolve(
@@ -1092,11 +1115,29 @@ class _Validator:
                     refs=(challenge.ref, discharge_closure.ref),
                     details=("expected:discharge.challenge",),
                 )
-            if challenge.contrary_atom is not None:
-                self._resolve(
-                    challenge.contrary_atom,
-                    RecordKind.ATOM,
-                    path=f"{path}.contrary_atom",
+            contrary_atom = (
+                cast(
+                    AtomRecord | None,
+                    self._resolve(
+                        challenge.contrary_atom,
+                        RecordKind.ATOM,
+                        path=f"{path}.contrary_atom",
+                    ),
+                )
+                if challenge.contrary_atom is not None
+                else None
+            )
+            if (
+                known_kind
+                and challenge.kind == "rebut"
+                and contrary_atom is not None
+                and contrary_atom.primitive
+            ):
+                self._add(
+                    ValidationPhase.BINDINGS,
+                    ValidationCode.PRIMITIVE_EFFECT_HEAD,
+                    f"{path}.contrary_atom",
+                    refs=(challenge.ref, contrary_atom.ref),
                 )
             if challenge.problem_face_atom is not None:
                 self._resolve(

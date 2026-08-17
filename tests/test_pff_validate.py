@@ -28,6 +28,7 @@ from poietics.pff.model import (
 )
 from poietics.pff.registry import (
     ArgumentTypeContract,
+    ChallengeTargetContract,
     CheckerContract,
     CheckerDetailField,
     CheckerDetailType,
@@ -35,6 +36,7 @@ from poietics.pff.registry import (
     ComputabilityClass,
     ContraryPolicy,
     ContraryPolicyMode,
+    DischargeCompatibility,
     FramePolicy,
     FramePolicyMode,
     GradePolicy,
@@ -231,6 +233,27 @@ def registry() -> PredicateRegistry:
 
 def catalog() -> RegistryCatalog:
     return RegistryCatalog(registries=(registry(),))
+
+
+def catalog_with_derived_permissions(
+    *,
+    challenge_kinds: frozenset[str] = frozenset(),
+    face_kinds: frozenset[str] = frozenset(),
+) -> RegistryCatalog:
+    authority = registry()
+    predicates = tuple(
+        replace(
+            definition,
+            allowed_challenge_kinds=(
+                definition.allowed_challenge_kinds | challenge_kinds
+            ),
+            allowed_face_kinds=definition.allowed_face_kinds | face_kinds,
+        )
+        if definition.predicate_id == "test.derived"
+        else definition
+        for definition in authority.predicates
+    )
+    return RegistryCatalog(registries=(replace(authority, predicates=predicates),))
 
 
 def atom(
@@ -1423,6 +1446,412 @@ class ContraryChallengeDischargeTests(unittest.TestCase):
                 ValidationCode.CHALLENGE_TARGET_KIND,
                 ValidationCode.CLOSURE_RESULT_MISMATCH,
             ],
+        )
+
+    def test_specialised_non_face_target_suppresses_dependent_resolution(self) -> None:
+        seed = linked_valid_package()
+        challenge = replace(
+            seed.challenges[0],
+            kind="localisation_gap",
+            target_kind=RecordKind.RULE,
+            target=ref("rule:missing"),
+        )
+        candidate = replace(
+            seed,
+            challenges=(challenge,),
+            closures=(
+                replace(seed.closures[0], members=frozenset()),
+                *seed.closures[1:],
+            ),
+        )
+        gap_catalog = catalog_with_derived_permissions(
+            challenge_kinds=frozenset({"localisation_gap"}),
+        )
+
+        with self.assertRaises(PackageValidationError) as caught:
+            validate_package(candidate, gap_catalog)
+
+        self.assertEqual(
+            caught.exception.issues,
+            (
+                ValidationIssue(
+                    phase=ValidationPhase.BINDINGS,
+                    code=ValidationCode.CHALLENGE_TARGET_KIND,
+                    path="challenge[challenge:under@1].target_kind",
+                    refs=(challenge.ref,),
+                    details=("rule",),
+                ),
+            ),
+        )
+
+    def test_specialised_target_reference_errors_suppress_face_kind_issue(self) -> None:
+        seed = linked_valid_package()
+        gap_catalog = catalog_with_derived_permissions(
+            challenge_kinds=frozenset({"localisation_gap"}),
+        )
+        missing_face = ref("face:missing")
+        cases = (
+            (
+                "unresolved",
+                replace(
+                    seed.challenges[0],
+                    kind="localisation_gap",
+                    target=missing_face,
+                ),
+                ValidationIssue(
+                    phase=ValidationPhase.REFERENCES,
+                    code=ValidationCode.UNRESOLVED_REFERENCE,
+                    path="challenge[challenge:under@1].target",
+                    refs=(missing_face,),
+                ),
+            ),
+            (
+                "wrong-record-kind",
+                replace(
+                    seed.challenges[0],
+                    kind="localisation_gap",
+                    target=seed.rules[0].ref,
+                ),
+                ValidationIssue(
+                    phase=ValidationPhase.REFERENCES,
+                    code=ValidationCode.REFERENCE_KIND_MISMATCH,
+                    path="challenge[challenge:under@1].target",
+                    refs=(seed.rules[0].ref,),
+                    details=("actual:rule", "expected:face"),
+                ),
+            ),
+        )
+
+        for label, challenge, expected in cases:
+            with self.subTest(label=label):
+                candidate = replace(
+                    seed,
+                    challenges=(challenge,),
+                    closures=(
+                        replace(seed.closures[0], members=frozenset()),
+                        *seed.closures[1:],
+                    ),
+                )
+                with self.assertRaises(PackageValidationError) as caught:
+                    validate_package(candidate, gap_catalog)
+                self.assertEqual(caught.exception.issues, (expected,))
+
+    def test_specialised_face_kind_binding_is_exact(self) -> None:
+        seed = linked_valid_package()
+        specialised_kinds = {
+            "localisation_gap": "localisation",
+            "recovery_gap": "recovery",
+            "closure_gap": "closure",
+        }
+        gap_catalog = catalog_with_derived_permissions(
+            challenge_kinds=frozenset(specialised_kinds),
+            face_kinds=frozenset(specialised_kinds.values()),
+        )
+
+        for challenge_kind, required_face_kind in specialised_kinds.items():
+            with self.subTest(challenge_kind=challenge_kind, binding="wrong"):
+                challenge = replace(seed.challenges[0], kind=challenge_kind)
+                with self.assertRaises(PackageValidationError) as caught:
+                    validate_package(
+                        replace(seed, challenges=(challenge,)),
+                        gap_catalog,
+                    )
+                self.assertEqual(
+                    caught.exception.issues,
+                    (
+                        ValidationIssue(
+                            phase=ValidationPhase.BINDINGS,
+                            code=ValidationCode.CHALLENGE_TARGET_FACE_KIND,
+                            path="challenge[challenge:under@1].target",
+                            refs=(challenge.ref, seed.faces[0].ref),
+                            details=(
+                                "actual:frame",
+                                f"expected:{required_face_kind}",
+                            ),
+                        ),
+                    ),
+                )
+
+            with self.subTest(challenge_kind=challenge_kind, binding="matching"):
+                matching_face = replace(
+                    seed.faces[0],
+                    kind=required_face_kind,
+                )
+                validated = validate_package(
+                    replace(
+                        seed,
+                        faces=(matching_face,),
+                        challenges=(challenge,),
+                    ),
+                    gap_catalog,
+                )
+                self.assertEqual(
+                    validated.package.faces[0].kind,
+                    required_face_kind,
+                )
+
+    def test_registry_extension_required_face_kind_is_enforced(self) -> None:
+        seed = linked_valid_package()
+        authority = registry()
+        extension_kind = "extension_gap"
+        predicates = tuple(
+            replace(
+                definition,
+                allowed_challenge_kinds=(
+                    definition.allowed_challenge_kinds | {extension_kind}
+                ),
+            )
+            if definition.predicate_id == "test.derived"
+            else definition
+            for definition in authority.predicates
+        )
+        extension_registry = replace(
+            authority,
+            known_challenge_kinds=(
+                authority.known_challenge_kinds | {extension_kind}
+            ),
+            predicates=predicates,
+            challenge_target_contracts=(
+                *authority.challenge_target_contracts,
+                ChallengeTargetContract(
+                    challenge_kind=extension_kind,
+                    allowed_target_kinds={RecordKind.FACE},
+                    required_face_kind="localisation",
+                ),
+            ),
+            discharge_compatibility=(
+                *authority.discharge_compatibility,
+                DischargeCompatibility(challenge_kind=extension_kind),
+            ),
+        )
+        challenge = replace(seed.challenges[0], kind=extension_kind)
+
+        with self.assertRaises(PackageValidationError) as caught:
+            validate_package(
+                replace(seed, challenges=(challenge,)),
+                RegistryCatalog(registries=(extension_registry,)),
+            )
+
+        self.assertEqual(
+            caught.exception.issues,
+            (
+                ValidationIssue(
+                    phase=ValidationPhase.BINDINGS,
+                    code=ValidationCode.CHALLENGE_TARGET_FACE_KIND,
+                    path="challenge[challenge:under@1].target",
+                    refs=(challenge.ref, seed.faces[0].ref),
+                    details=("actual:frame", "expected:localisation"),
+                ),
+            ),
+        )
+
+        matching_contracts = tuple(
+            replace(item, required_face_kind="frame")
+            if item.challenge_kind == extension_kind
+            else item
+            for item in extension_registry.challenge_target_contracts
+        )
+        matching_registry = replace(
+            extension_registry,
+            challenge_target_contracts=matching_contracts,
+        )
+        validated = validate_package(
+            replace(seed, challenges=(challenge,)),
+            RegistryCatalog(registries=(matching_registry,)),
+        )
+        self.assertEqual(validated.package.faces[0].kind, "frame")
+
+    def test_rebut_effect_head_requires_exact_resolved_nonprimitive_atom(self) -> None:
+        seed = linked_valid_package()
+        challenge = seed.challenges[0]
+        primitive_effect = atom(
+            "atom:primitive-effect",
+            "test.primitive",
+            primitive=True,
+        )
+        primitive_rebut = replace(
+            challenge,
+            kind="rebut",
+            contrary_atom=primitive_effect.ref,
+        )
+        with self.assertRaises(PackageValidationError) as caught:
+            validate_package(
+                replace(
+                    seed,
+                    atoms=(*seed.atoms, primitive_effect),
+                    challenges=(primitive_rebut,),
+                ),
+                catalog(),
+            )
+        self.assertEqual(
+            caught.exception.issues,
+            (
+                ValidationIssue(
+                    phase=ValidationPhase.BINDINGS,
+                    code=ValidationCode.PRIMITIVE_EFFECT_HEAD,
+                    path="challenge[challenge:under@1].contrary_atom",
+                    refs=(primitive_effect.ref, primitive_rebut.ref),
+                ),
+            ),
+        )
+
+        missing_effect = ref("atom:missing-effect")
+        invalid_cases = (
+            (
+                "missing",
+                replace(challenge, kind="rebut", contrary_atom=None),
+                ValidationIssue(
+                    phase=ValidationPhase.BINDINGS,
+                    code=ValidationCode.REBUT_CONTRARY_REQUIRED,
+                    path="challenge[challenge:under@1].contrary_atom",
+                    refs=(challenge.ref,),
+                ),
+            ),
+            (
+                "unresolved",
+                replace(challenge, kind="rebut", contrary_atom=missing_effect),
+                ValidationIssue(
+                    phase=ValidationPhase.REFERENCES,
+                    code=ValidationCode.UNRESOLVED_REFERENCE,
+                    path="challenge[challenge:under@1].contrary_atom",
+                    refs=(missing_effect,),
+                ),
+            ),
+            (
+                "wrong-record-kind",
+                replace(challenge, kind="rebut", contrary_atom=seed.rules[0].ref),
+                ValidationIssue(
+                    phase=ValidationPhase.REFERENCES,
+                    code=ValidationCode.REFERENCE_KIND_MISMATCH,
+                    path="challenge[challenge:under@1].contrary_atom",
+                    refs=(seed.rules[0].ref,),
+                    details=("actual:rule", "expected:atom"),
+                ),
+            ),
+        )
+        for label, rebut, expected in invalid_cases:
+            with self.subTest(label=label):
+                with self.assertRaises(PackageValidationError) as caught:
+                    validate_package(
+                        replace(seed, challenges=(rebut,)),
+                        catalog(),
+                    )
+                self.assertEqual(caught.exception.issues, (expected,))
+
+        nonprimitive_rebut = replace(
+            challenge,
+            kind="rebut",
+            contrary_atom=seed.atoms[2].ref,
+        )
+        validated = validate_package(
+            replace(seed, challenges=(nonprimitive_rebut,)),
+            catalog(),
+        )
+        self.assertEqual(
+            validated.package.challenges[0].contrary_atom,
+            seed.atoms[2].ref,
+        )
+
+        optional_primitive = replace(
+            challenge,
+            contrary_atom=primitive_effect.ref,
+        )
+        validated = validate_package(
+            replace(
+                seed,
+                atoms=(*seed.atoms, primitive_effect),
+                challenges=(optional_primitive,),
+            ),
+            catalog(),
+        )
+        self.assertEqual(validated.package.challenges[0].kind, "undercut")
+
+    def test_unknown_rebut_does_not_apply_primitive_effect_policy(self) -> None:
+        seed = linked_valid_package()
+        authority = registry()
+        primitive_effect = atom(
+            "atom:primitive-effect",
+            "test.primitive",
+            primitive=True,
+        )
+        rebut = replace(
+            seed.challenges[0],
+            kind="rebut",
+            contrary_atom=primitive_effect.ref,
+        )
+        predicates = tuple(
+            replace(
+                definition,
+                allowed_challenge_kinds=(
+                    definition.allowed_challenge_kinds - {"rebut"}
+                ),
+            )
+            for definition in authority.predicates
+        )
+        without_rebut = replace(
+            authority,
+            known_challenge_kinds=authority.known_challenge_kinds - {"rebut"},
+            predicates=predicates,
+            challenge_target_contracts=tuple(
+                item
+                for item in authority.challenge_target_contracts
+                if item.challenge_kind != "rebut"
+            ),
+            discharge_compatibility=tuple(
+                item
+                for item in authority.discharge_compatibility
+                if item.challenge_kind != "rebut"
+            ),
+        )
+
+        with self.assertRaises(PackageValidationError) as caught:
+            validate_package(
+                replace(
+                    seed,
+                    atoms=(*seed.atoms, primitive_effect),
+                    challenges=(rebut,),
+                ),
+                RegistryCatalog(registries=(without_rebut,)),
+            )
+
+        self.assertEqual(
+            caught.exception.issues,
+            (
+                ValidationIssue(
+                    phase=ValidationPhase.POLICIES,
+                    code=ValidationCode.UNKNOWN_CHALLENGE_KIND,
+                    path="challenge[challenge:under@1].kind",
+                    refs=(rebut.ref,),
+                    details=("rebut",),
+                ),
+            ),
+        )
+
+    def test_defect_primitive_problem_face_atom_remains_deferred(self) -> None:
+        seed = linked_valid_package()
+        primitive_problem = atom(
+            "atom:primitive-problem",
+            "test.primitive",
+            primitive=True,
+        )
+        defect = replace(
+            seed.challenges[0],
+            kind="defect",
+            problem_face_atom=primitive_problem.ref,
+        )
+
+        validated = validate_package(
+            replace(
+                seed,
+                atoms=(*seed.atoms, primitive_problem),
+                challenges=(defect,),
+            ),
+            catalog(),
+        )
+
+        self.assertEqual(
+            validated.package.challenges[0].problem_face_atom,
+            primitive_problem.ref,
         )
 
     def test_missing_challenge_target_has_one_direct_reference_issue(self) -> None:

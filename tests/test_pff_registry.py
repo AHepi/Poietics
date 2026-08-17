@@ -530,6 +530,293 @@ class RegistryConstructionTests(unittest.TestCase):
             ),
         )
 
+    def test_required_face_kind_is_exact_immutable_and_structurally_coherent(
+        self,
+    ) -> None:
+        class StringSubclass(str):
+            pass
+
+        default_contract = ChallengeTargetContract(
+            challenge_kind="undercut",
+            allowed_target_kinds={RecordKind.RULE, RecordKind.FACE},
+        )
+        exact_contract = ChallengeTargetContract(
+            challenge_kind="localisation_gap",
+            allowed_target_kinds={RecordKind.FACE},
+            required_face_kind="localisation",
+        )
+
+        self.assertIsNone(default_contract.required_face_kind)
+        self.assertEqual(exact_contract.required_face_kind, "localisation")
+        self.assertEqual(
+            exact_contract.allowed_target_kinds,
+            frozenset({RecordKind.FACE}),
+        )
+        with self.assertRaises(FrozenInstanceError):
+            exact_contract.required_face_kind = "recovery"  # type: ignore[misc]
+
+        for bad_value in ("", 17, StringSubclass("localisation")):
+            with self.subTest(bad_value=bad_value):
+                with self.assertRaises(RegistryDefinitionError) as caught:
+                    ChallengeTargetContract(
+                        challenge_kind="localisation_gap",
+                        allowed_target_kinds={RecordKind.FACE},
+                        required_face_kind=bad_value,  # type: ignore[arg-type]
+                    )
+                self.assertEqual(
+                    caught.exception.code,
+                    RegistryDefinitionErrorCode.INVALID_ID,
+                )
+                self.assertEqual(
+                    caught.exception.location,
+                    "challenge_target:localisation_gap.required_face_kind",
+                )
+                self.assertEqual(caught.exception.identifiers, ())
+
+        with self.assertRaises(RegistryDefinitionError) as caught:
+            ChallengeTargetContract(
+                challenge_kind="localisation_gap",
+                allowed_target_kinds={RecordKind.RULE},
+                required_face_kind="",
+            )
+        self.assertEqual(
+            caught.exception.code,
+            RegistryDefinitionErrorCode.INVALID_ID,
+        )
+        self.assertEqual(
+            caught.exception.location,
+            "challenge_target:localisation_gap.required_face_kind",
+        )
+        self.assertEqual(caught.exception.identifiers, ())
+
+        for incoherent_targets in (
+            {RecordKind.RULE},
+            {RecordKind.RULE, RecordKind.FACE},
+            frozenset(),
+        ):
+            with self.subTest(incoherent_targets=incoherent_targets):
+                with self.assertRaises(RegistryDefinitionError) as caught:
+                    ChallengeTargetContract(
+                        challenge_kind="localisation_gap",
+                        allowed_target_kinds=incoherent_targets,
+                        required_face_kind="localisation",
+                    )
+                self.assertEqual(
+                    caught.exception.code,
+                    RegistryDefinitionErrorCode.INCOHERENT_CONTRACT,
+                )
+                self.assertEqual(
+                    caught.exception.location,
+                    "challenge_target:localisation_gap.required_face_kind",
+                )
+                self.assertEqual(caught.exception.identifiers, ())
+
+    def test_core_required_face_mappings_and_extension_lookup_are_exact(self) -> None:
+        authority = make_registry()
+        expected = {
+            "localisation_gap": "localisation",
+            "recovery_gap": "recovery",
+            "closure_gap": "closure",
+        }
+
+        for challenge_kind, face_kind in expected.items():
+            with self.subTest(challenge_kind=challenge_kind):
+                contract = authority.challenge_target_contract(challenge_kind)
+                self.assertEqual(contract.required_face_kind, face_kind)
+                self.assertEqual(
+                    contract.allowed_target_kinds,
+                    frozenset({RecordKind.FACE}),
+                )
+                self.assertEqual(
+                    authority.allowed_challenge_target_kinds(challenge_kind),
+                    contract.allowed_target_kinds,
+                )
+
+        self.assertIsNone(
+            authority.challenge_target_contract("undercut").required_face_kind
+        )
+        with self.assertRaises(KeyError):
+            authority.challenge_target_contract("missing")
+
+        extension_kind = "extension_gap"
+        extension_contract = ChallengeTargetContract(
+            challenge_kind=extension_kind,
+            allowed_target_kinds={RecordKind.FACE},
+            required_face_kind="frame",
+        )
+        extended = replace(
+            authority,
+            known_challenge_kinds=authority.known_challenge_kinds | {extension_kind},
+            discharge_compatibility=(
+                *authority.discharge_compatibility,
+                DischargeCompatibility(challenge_kind=extension_kind),
+            ),
+            challenge_target_contracts=(
+                *authority.challenge_target_contracts,
+                extension_contract,
+            ),
+        )
+        self.assertIs(
+            extended.challenge_target_contract(extension_kind),
+            extension_contract,
+        )
+        self.assertEqual(
+            extended.allowed_challenge_target_kinds(extension_kind),
+            frozenset({RecordKind.FACE}),
+        )
+
+        unknown_extension_contract = replace(
+            extension_contract,
+            required_face_kind="missing-extension-face",
+        )
+        with self.assertRaises(RegistryDefinitionError) as caught:
+            replace(
+                authority,
+                known_challenge_kinds=authority.known_challenge_kinds
+                | {extension_kind},
+                discharge_compatibility=(
+                    *authority.discharge_compatibility,
+                    DischargeCompatibility(challenge_kind=extension_kind),
+                ),
+                challenge_target_contracts=(
+                    *authority.challenge_target_contracts,
+                    unknown_extension_contract,
+                ),
+            )
+        self.assertEqual(
+            caught.exception.code,
+            RegistryDefinitionErrorCode.UNKNOWN_FACE_KIND,
+        )
+        self.assertEqual(
+            caught.exception.location,
+            "registry:test-registry/1.challenge_target_contracts",
+        )
+        self.assertEqual(
+            caught.exception.identifiers,
+            ("missing-extension-face",),
+        )
+
+    def test_required_face_ceiling_and_unknown_face_precedence_are_exact(self) -> None:
+        authority = make_registry()
+
+        unknown_face_targets = tuple(
+            replace(item, required_face_kind="missing-face-kind")
+            if item.challenge_kind == "localisation_gap"
+            else item
+            for item in authority.challenge_target_contracts
+        )
+        with self.assertRaises(RegistryDefinitionError) as caught:
+            replace(
+                authority,
+                challenge_target_contracts=unknown_face_targets,
+            )
+        self.assertEqual(
+            caught.exception.code,
+            RegistryDefinitionErrorCode.UNKNOWN_FACE_KIND,
+        )
+        self.assertEqual(
+            caught.exception.location,
+            "registry:test-registry/1.challenge_target_contracts",
+        )
+        self.assertEqual(caught.exception.identifiers, ("missing-face-kind",))
+
+        two_unknown_face_targets = tuple(
+            replace(
+                item,
+                required_face_kind={
+                    "localisation_gap": "missing-z-face-kind",
+                    "recovery_gap": "missing-a-face-kind",
+                }[item.challenge_kind],
+            )
+            if item.challenge_kind in {"localisation_gap", "recovery_gap"}
+            else item
+            for item in authority.challenge_target_contracts
+        )
+        with self.assertRaises(RegistryDefinitionError) as caught:
+            replace(
+                authority,
+                challenge_target_contracts=two_unknown_face_targets,
+            )
+        self.assertEqual(
+            caught.exception.code,
+            RegistryDefinitionErrorCode.UNKNOWN_FACE_KIND,
+        )
+        self.assertEqual(
+            caught.exception.location,
+            "registry:test-registry/1.challenge_target_contracts",
+        )
+        self.assertEqual(
+            caught.exception.identifiers,
+            ("missing-a-face-kind", "missing-z-face-kind"),
+        )
+
+        ceiling_changes = (
+            ("localisation_gap", {"required_face_kind": "recovery"}),
+            ("localisation_gap", {"required_face_kind": None}),
+            (
+                "undercut",
+                {
+                    "allowed_target_kinds": {RecordKind.FACE},
+                    "required_face_kind": "frame",
+                },
+            ),
+        )
+        for challenge_kind, changes in ceiling_changes:
+            with self.subTest(challenge_kind=challenge_kind, changes=changes):
+                changed_targets = tuple(
+                    replace(item, **changes)
+                    if item.challenge_kind == challenge_kind
+                    else item
+                    for item in authority.challenge_target_contracts
+                )
+                with self.assertRaises(RegistryDefinitionError) as caught:
+                    replace(
+                        authority,
+                        challenge_target_contracts=changed_targets,
+                    )
+                self.assertEqual(
+                    caught.exception.code,
+                    RegistryDefinitionErrorCode.INCOHERENT_CONTRACT,
+                )
+                self.assertEqual(
+                    caught.exception.location,
+                    "registry:test-registry/1.challenge_target_contracts",
+                )
+                self.assertEqual(caught.exception.identifiers, (challenge_kind,))
+
+        two_ceiling_offenders = tuple(
+            replace(
+                item,
+                **{
+                    "localisation_gap": {"required_face_kind": "recovery"},
+                    "undercut": {
+                        "allowed_target_kinds": {RecordKind.FACE},
+                        "required_face_kind": "frame",
+                    },
+                }[item.challenge_kind],
+            )
+            if item.challenge_kind in {"localisation_gap", "undercut"}
+            else item
+            for item in authority.challenge_target_contracts
+        )
+        with self.assertRaises(RegistryDefinitionError) as caught:
+            replace(
+                authority,
+                challenge_target_contracts=two_ceiling_offenders,
+            )
+        self.assertEqual(
+            caught.exception.code,
+            RegistryDefinitionErrorCode.INCOHERENT_CONTRACT,
+        )
+        self.assertEqual(
+            caught.exception.location,
+            "registry:test-registry/1.challenge_target_contracts",
+        )
+        self.assertEqual(
+            caught.exception.identifiers,
+            ("localisation_gap", "undercut"),
+        )
+
     def test_rejects_incoherent_compatibility_vocabulary(self) -> None:
         table = tuple(make_registry().discharge_compatibility)
         self.assert_registry_error(
@@ -630,32 +917,47 @@ class DependencyBoundaryTests(unittest.TestCase):
     def test_registry_imports_only_the_pff_model_from_project_code(self) -> None:
         source = Path(registry_module.__file__).read_text(encoding="utf-8")
         tree = ast.parse(source)
-        relative_imports = {
-            node.module
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom) and node.level > 0
-        }
-        imported_module_parts = {
-            part
-            for node in ast.walk(tree)
-            for module in (
-                ([node.module] if isinstance(node, ast.ImportFrom) else [])
-                + (
-                    [alias.name for alias in node.names]
-                    if isinstance(node, ast.Import)
-                    else []
-                )
+        import_from_signatures = {
+            (
+                node.level,
+                node.module,
+                frozenset((alias.name, alias.asname) for alias in node.names),
             )
-            if module is not None
-            for part in module.split(".")
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+        }
+        import_signatures = {
+            (alias.name, alias.asname)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
         }
 
-        self.assertEqual(relative_imports, {"model"})
-        self.assertTrue(
-            {"ground", "provider", "compiler", "validate"}.isdisjoint(
-                imported_module_parts
-            )
+        self.assertEqual(
+            import_from_signatures,
+            {
+                (0, "__future__", frozenset({("annotations", None)})),
+                (
+                    0,
+                    "collections.abc",
+                    frozenset({("Iterable", None), ("Mapping", None)}),
+                ),
+                (
+                    0,
+                    "dataclasses",
+                    frozenset({("dataclass", None), ("field", None)}),
+                ),
+                (0, "enum", frozenset({("StrEnum", None)})),
+                (0, "types", frozenset({("MappingProxyType", None)})),
+                (0, "typing", frozenset({("TypeVar", None)})),
+                (
+                    1,
+                    "model",
+                    frozenset({("RecordKind", None), ("RecordRef", None)}),
+                ),
+            },
         )
+        self.assertEqual(import_signatures, set())
 
 
 if __name__ == "__main__":
