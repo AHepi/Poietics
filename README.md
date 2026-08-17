@@ -6,10 +6,11 @@ evaluator over a finite ground program.
 
 The implemented core now includes immutable package candidates, an exact
 code-owned predicate registry, deterministic validation, opaque ground atom
-references, immutable ground rules, initial live and excluded sets, a
-protected-open set, and the fixed-point evaluation specified by PFF Core v0.1.
-Its statuses are package-relative computational results. They are not truth,
-acceptance, support, confidence, or probability judgements.
+references, deterministic certificate and closure gate compilation, immutable
+ground rules, initial live and excluded sets, a protected-open set, and the
+fixed-point evaluation specified by PFF Core v0.1. Its statuses are
+package-relative computational results. They are not truth, acceptance,
+support, confidence, or probability judgements.
 
 ## Current seam
 
@@ -19,16 +20,35 @@ acceptance, support, confidence, or probability judgements.
 | `poietics.pff.registry` | Exact immutable predicate, checker-shape, and policy contracts | Provider calls, checker execution, mutable registration, and manifest loading |
 | `poietics.pff.local_checkers` | Pure recomputation of explicitly code-owned package-local checker contracts | External evidence, I/O, provider calls, compilation, and evaluation |
 | `poietics.pff.validate` | Mint `ValidatedPackage` or raise deterministic typed issues | Repairing proposals, external checker execution, compilation, and evaluation |
+| `poietics.pff.compile` | Lower a validated package through certificate and closure gates into one `GroundProgram`, retaining contraries and an immutable source map | Checker/provider execution, evaluation, parsing, and pending face/challenge/discharge lowering |
 | `poietics.ground.model` | Immutable ground records and typed statuses | Packages, predicates, certificates, faces, and challenges |
 | `poietics.ground.evaluate` | One authoritative fixed-point path | Domain interpretation, provenance, replay, and incremental evaluation |
-| Future compiler | Lower typed PFF packages to `GroundProgram` | Changing evaluator semantics |
 | Future explanation layer | Combine source maps and contraries with an `Evaluation` | Persisting or inventing verdicts |
 
 The dependency direction is intentionally one-way: a generator or other
 producer creates a `Package`; validation binds it to one exact registry and
-mints a `ValidatedPackage`; a future compiler will create a `GroundProgram`;
-the ground evaluator derives an `Evaluation`. Rule indexes and statuses are
-always recomputed and are never stored as authority.
+mints a `ValidatedPackage`; the compiler creates a `Compilation` containing a
+`GroundProgram`; the ground evaluator derives an `Evaluation`. Rule indexes
+and statuses are always recomputed and are never stored as authority.
+
+## Compiler boundary
+
+Compilation reads only an exact `ValidatedPackage`. Every source atom keeps
+its exact ID and version. Every certificate, closure, and rule case receives a
+reserved, version-bearing generated identity that is independent of collection
+order. The result carries an immutable source map for later explanation and a
+separate normalized contrary relation; contraries are never converted into
+blocking rules or explosion.
+
+The current compiler milestone implements the complete pass/fail/open tables
+for certificate and closure gates, exact source-base transfer, closure-guarded
+default negation, and independent face-free rule cases. In particular, a
+failed closure protects `closure-ready` as open rather than excluding it, so a
+failed closure cannot establish absence. Validated packages containing faces,
+challenges, or discharges receive deterministic typed compilation issues and
+no partial result. That fail-closed boundary will be removed only when the
+next compiler slice supplies their exact lowering; those records are never
+silently ignored.
 
 ## Package-validation boundary
 
@@ -85,8 +105,7 @@ From a clean checkout, the focused milestone check is:
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -B -m unittest discover -s tests -v
 ```
 
-The next bounded milestone is deterministic compilation from
-`ValidatedPackage` into the existing `GroundProgram`, beginning with
-certificate and closure gates. Generator/provider adapters, canonical package
-bytes, explanation, replay, CLI, and empirical-pack work remain separate later
-milestones.
+The next bounded milestone is face and challenge compilation, after resolving
+the specification's rule-target blocker and revocation-selection gaps.
+Generator/provider adapters, canonical package bytes, explanation, replay,
+CLI, and empirical-pack work remain separate later milestones.
