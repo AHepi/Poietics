@@ -38,9 +38,11 @@ from poietics.pff.model import (
     Selector,
 )
 from poietics.pff.registry import (
+    ChallengeTargetContract,
     CheckerContract,
     CheckerDetailType,
     CheckerUse,
+    DischargeCompatibility,
     RegistryCatalog,
     SelectorFieldContract,
 )
@@ -48,9 +50,7 @@ import poietics.pff.validate as validate_module
 from poietics.pff.validate import ValidatedPackage, validate_package
 from tests.test_pff_validate import (
     atom,
-    catalog,
     certificate,
-    linked_valid_package,
     minimal_valid_package,
     ref,
     registry,
@@ -75,13 +75,25 @@ def literal_rule(
     )
 
 
-def compiler_catalog() -> RegistryCatalog:
+def compiler_catalog(
+    *,
+    challenge_kinds: frozenset[str] = frozenset(),
+    face_kinds: frozenset[str] = frozenset(),
+    extension_targets: tuple[ChallengeTargetContract, ...] = (),
+) -> RegistryCatalog:
     authority = registry()
+    extension_kinds = frozenset(
+        contract.challenge_kind for contract in extension_targets
+    )
     supplied_closure = CheckerContract(
         checker_id=SUPPLIED_CLOSURE_CHECKER,
         version=1,
         uses={CheckerUse.CLOSURE},
-        closure_selector_kinds={RecordKind.ATOM, RecordKind.CHALLENGE},
+        closure_selector_kinds={
+            RecordKind.ATOM,
+            RecordKind.CHALLENGE,
+            RecordKind.DISCHARGE,
+        },
         selector_fields=(
             SelectorFieldContract(
                 record_type=RecordKind.CHALLENGE,
@@ -89,16 +101,54 @@ def compiler_catalog() -> RegistryCatalog:
                 value_type=CheckerDetailType.RECORD_REF,
                 allowed_record_kinds={RecordKind.FACE},
             ),
+            SelectorFieldContract(
+                record_type=RecordKind.DISCHARGE,
+                field="challenge",
+                value_type=CheckerDetailType.RECORD_REF,
+                allowed_record_kinds={RecordKind.CHALLENGE},
+            ),
         ),
         closure_frame_policy_id="frame:exact-package",
+    )
+    predicates = tuple(
+        replace(
+            definition,
+            allowed_challenge_kinds=(
+                definition.allowed_challenge_kinds
+                | challenge_kinds
+                | extension_kinds
+            ),
+            allowed_face_kinds=definition.allowed_face_kinds | face_kinds,
+        )
+        if definition.predicate_id == "test.derived"
+        else definition
+        for definition in authority.predicates
     )
     return RegistryCatalog(
         registries=(
             replace(
                 authority,
+                known_challenge_kinds=(
+                    authority.known_challenge_kinds | extension_kinds
+                ),
+                predicates=predicates,
                 checker_contracts=(
                     *authority.checker_contracts,
                     supplied_closure,
+                ),
+                challenge_target_contracts=(
+                    *authority.challenge_target_contracts,
+                    *extension_targets,
+                ),
+                discharge_compatibility=(
+                    *authority.discharge_compatibility,
+                    *(
+                        DischargeCompatibility(
+                            challenge_kind=kind,
+                            admissible_discharge_kinds={"repair"},
+                        )
+                        for kind in sorted(extension_kinds)
+                    ),
                 ),
             ),
         )
@@ -275,6 +325,274 @@ def versioned_face_package() -> Package:
     )
 
 
+DischargeFixture = tuple[str, int, str, CheckResult, str, int]
+
+
+def challenge_package(
+    *,
+    challenge_kind: str = "undercut",
+    face_kind: str = "frame",
+    challenge_result: CheckResult = CheckResult.PASS,
+    discharge_closure_result: CheckResult = CheckResult.PASS,
+    discharge_rows: tuple[DischargeFixture, ...] = (),
+) -> tuple[Package, RegistryCatalog]:
+    """Build one decorrelated, otherwise-valid challenge fixture."""
+
+    seed = face_graph_package(
+        (
+            (
+                "face:target",
+                5,
+                "rule:owner",
+                2,
+                "closure:blockers",
+                9,
+                CheckResult.PASS,
+            ),
+        )
+    )
+    face = replace(seed.faces[0], kind=face_kind)
+    challenge = ChallengeRecord(
+        id="challenge:block",
+        version=7,
+        kind=challenge_kind,
+        target_kind=RecordKind.FACE,
+        target=face.ref,
+        certificate=ref("cert:block", 13),
+        discharge_closure=ref("closure:discharges", 11),
+        contrary_atom=(
+            ref("atom:rebut-effect", 31)
+            if challenge_kind == "rebut"
+            else None
+        ),
+    )
+    discharges = tuple(
+        DischargeRecord(
+            id=record_id,
+            version=version,
+            challenge=challenge.ref,
+            kind=kind,
+            certificate=ref(certificate_id, certificate_version),
+        )
+        for (
+            record_id,
+            version,
+            kind,
+            _,
+            certificate_id,
+            certificate_version,
+        ) in discharge_rows
+    )
+    challenge_certificate = replace(
+        certificate(
+            "cert:block",
+            "challenge-witness/v1",
+            challenge.ref,
+            result=challenge_result,
+        ),
+        version=13,
+    )
+    discharge_certificates = tuple(
+        replace(
+            certificate(
+                certificate_id,
+                "discharge-witness/v1",
+                discharge.ref,
+                result=result,
+            ),
+            version=certificate_version,
+        )
+        for discharge, (
+            _,
+            _,
+            _,
+            result,
+            certificate_id,
+            certificate_version,
+        ) in zip(discharges, discharge_rows, strict=True)
+    )
+    discharge_closure = ClosureRecord(
+        id="closure:discharges",
+        version=11,
+        checker=SUPPLIED_CLOSURE_CHECKER,
+        result=discharge_closure_result,
+        cut_id="cut:1",
+        frame="frame:1",
+        selector=Selector(
+            record_type=RecordKind.DISCHARGE,
+            where={"challenge": challenge.ref},
+        ),
+        members=tuple(discharge.ref for discharge in discharges),
+    )
+    atoms = seed.atoms
+    if challenge_kind == "rebut":
+        atoms = (
+            *atoms,
+            atom(
+                "atom:rebut-effect",
+                "test.derived",
+                version=31,
+            ),
+        )
+    candidate = replace(
+        seed,
+        atoms=atoms,
+        faces=(face,),
+        certificates=(
+            *seed.certificates,
+            challenge_certificate,
+            *discharge_certificates,
+        ),
+        closures=(*seed.closures, discharge_closure),
+        challenges=(challenge,),
+        discharges=discharges,
+    )
+    return (
+        candidate,
+        compiler_catalog(
+            challenge_kinds=frozenset({challenge_kind}),
+            face_kinds=frozenset({face_kind}),
+        ),
+    )
+
+
+def unsupported_challenge_package(
+) -> tuple[Package, RegistryCatalog, tuple[CompilationIssue, ...]]:
+    """Build every deferred root with discharges that must not cascade."""
+
+    seed = minimal_valid_package()
+    extension_kind = "extension_effect"
+    rows = (
+        (
+            "challenge:a-shared",
+            2,
+            extension_kind,
+            "repair",
+            CompilationCode.CHALLENGE_EFFECT_UNSUPPORTED,
+        ),
+        (
+            "challenge:a-shared",
+            9,
+            "revoke",
+            "explicit_retraction",
+            CompilationCode.REVOCATION_SELECTION_UNSUPPORTED,
+        ),
+        (
+            "challenge:b-current",
+            4,
+            "currentness_gap",
+            "current_frontier_witness",
+            CompilationCode.CURRENTNESS_TARGET_UNSUPPORTED,
+        ),
+        (
+            "challenge:c-defect",
+            6,
+            "defect",
+            "good_face_discharge",
+            CompilationCode.PROBLEM_FACE_LIFECYCLE_UNSUPPORTED,
+        ),
+        (
+            "challenge:d-rule-target",
+            8,
+            "undercut",
+            "repair",
+            CompilationCode.RULE_TARGET_BLOCKING_UNSUPPORTED,
+        ),
+    )
+    challenges: list[ChallengeRecord] = []
+    discharges: list[DischargeRecord] = []
+    certificates = list(seed.certificates)
+    closures: list[ClosureRecord] = []
+    expected: list[CompilationIssue] = []
+    for position, (
+        challenge_id,
+        challenge_version,
+        challenge_kind,
+        discharge_kind,
+        code,
+    ) in enumerate(rows):
+        challenge = ChallengeRecord(
+            id=challenge_id,
+            version=challenge_version,
+            kind=challenge_kind,
+            target_kind=RecordKind.RULE,
+            target=seed.rules[0].ref,
+            certificate=ref(f"cert:challenge:{position}", 13 + position),
+            discharge_closure=ref(f"closure:challenge:{position}", 23 + position),
+            problem_face_atom=(
+                seed.atoms[1].ref if challenge_kind == "defect" else None
+            ),
+        )
+        discharge = DischargeRecord(
+            id=f"discharge:root:{position}",
+            version=31 + position,
+            challenge=challenge.ref,
+            kind=discharge_kind,
+            certificate=ref(f"cert:discharge:{position}", 41 + position),
+        )
+        challenges.append(challenge)
+        discharges.append(discharge)
+        certificates.extend(
+            (
+                replace(
+                    certificate(
+                        f"cert:challenge:{position}",
+                        "challenge-witness/v1",
+                        challenge.ref,
+                    ),
+                    version=13 + position,
+                ),
+                replace(
+                    certificate(
+                        f"cert:discharge:{position}",
+                        "discharge-witness/v1",
+                        discharge.ref,
+                    ),
+                    version=41 + position,
+                ),
+            )
+        )
+        closures.append(
+            ClosureRecord(
+                id=f"closure:challenge:{position}",
+                version=23 + position,
+                checker=SUPPLIED_CLOSURE_CHECKER,
+                result=CheckResult.PASS,
+                cut_id="cut:1",
+                frame="frame:1",
+                selector=Selector(
+                    record_type=RecordKind.DISCHARGE,
+                    where={"challenge": challenge.ref},
+                ),
+                members=(discharge.ref,),
+            )
+        )
+        expected.append(
+            CompilationIssue(
+                code=code,
+                record_kind=RecordKind.CHALLENGE,
+                ref=challenge.ref,
+            )
+        )
+
+    candidate = replace(
+        seed,
+        certificates=tuple(certificates),
+        closures=tuple(closures),
+        challenges=tuple(challenges),
+        discharges=tuple(discharges),
+    )
+    extension = ChallengeTargetContract(
+        challenge_kind=extension_kind,
+        allowed_target_kinds={RecordKind.RULE},
+    )
+    authority = compiler_catalog(
+        challenge_kinds=frozenset(row[2] for row in rows),
+        extension_targets=(extension,),
+    )
+    return candidate, authority, tuple(expected)
+
+
 def literal_origin(
     artifact_kind: GroundArtifactKind,
     artifact_ref: str,
@@ -293,6 +611,63 @@ def literal_origin(
                 ref=ref(source_id, source_version),
             ),
         ),
+    )
+
+
+CHALLENGE_COMPILATION_ROLES = frozenset(
+    {
+        CompilationRole.CHALLENGE_CASE,
+        CompilationRole.DISCHARGED,
+        CompilationRole.OPEN_CHALLENGE,
+        CompilationRole.TYPE_MATCH,
+        CompilationRole.DISCHARGE_CASE,
+        CompilationRole.CHALLENGE_CASE_RULE,
+        CompilationRole.DISCHARGE_CASE_RULE,
+        CompilationRole.DISCHARGED_BRIDGE,
+        CompilationRole.OPEN_CHALLENGE_RULE,
+        CompilationRole.REBUT_EFFECT,
+        CompilationRole.FACE_BLOCK_EFFECT,
+    }
+)
+
+
+def owned_challenge_slice(
+    compilation: Compilation,
+    owner_refs: frozenset[object],
+) -> tuple[
+    frozenset[str],
+    frozenset[GroundRule],
+    frozenset[str],
+    frozenset[str],
+    frozenset[str],
+    tuple[ArtifactOrigin, ...],
+]:
+    origins = tuple(
+        origin
+        for origin in compilation.origins
+        if origin.role in CHALLENGE_COMPILATION_ROLES
+        and any(source.ref in owner_refs for source in origin.sources)
+    )
+    atoms = frozenset(
+        origin.artifact_ref
+        for origin in origins
+        if origin.artifact_kind is GroundArtifactKind.ATOM
+    )
+    rule_ids = frozenset(
+        origin.artifact_ref
+        for origin in origins
+        if origin.artifact_kind is GroundArtifactKind.RULE
+    )
+    rules = frozenset(
+        rule for rule in compilation.program.rules if rule.id in rule_ids
+    )
+    return (
+        atoms,
+        rules,
+        atoms & compilation.program.base_live,
+        atoms & compilation.program.base_excluded,
+        atoms & compilation.program.protected_open,
+        origins,
     )
 
 
@@ -1040,6 +1415,735 @@ class ExactLoweringTests(unittest.TestCase):
                 )
 
 
+class ChallengeAndDischargeLoweringTests(unittest.TestCase):
+    def test_public_roles_codes_and_generic_lowering_match_literal_goldens(
+        self,
+    ) -> None:
+        expected_roles = {
+            "CHALLENGE_CASE": "challenge-case",
+            "DISCHARGED": "discharged",
+            "OPEN_CHALLENGE": "open-challenge",
+            "TYPE_MATCH": "type-match",
+            "DISCHARGE_CASE": "discharge-case",
+            "CHALLENGE_CASE_RULE": "challenge-case-rule",
+            "DISCHARGE_CASE_RULE": "discharge-case-rule",
+            "DISCHARGED_BRIDGE": "discharged-bridge",
+            "OPEN_CHALLENGE_RULE": "open-challenge-rule",
+            "REBUT_EFFECT": "rebut-effect",
+            "FACE_BLOCK_EFFECT": "face-block-effect",
+        }
+        self.assertEqual(
+            {
+                name: CompilationRole[name].value
+                for name in expected_roles
+            },
+            expected_roles,
+        )
+        self.assertEqual(
+            {member.name: member.value for member in CompilationCode},
+            {
+                "UNSUPPORTED_RECORD_KIND": "unsupported_record_kind",
+                "RULE_TARGET_BLOCKING_UNSUPPORTED": (
+                    "rule_target_blocking_unsupported"
+                ),
+                "REVOCATION_SELECTION_UNSUPPORTED": (
+                    "revocation_selection_unsupported"
+                ),
+                "CURRENTNESS_TARGET_UNSUPPORTED": (
+                    "currentness_target_unsupported"
+                ),
+                "PROBLEM_FACE_LIFECYCLE_UNSUPPORTED": (
+                    "problem_face_lifecycle_unsupported"
+                ),
+                "CHALLENGE_EFFECT_UNSUPPORTED": (
+                    "challenge_effect_unsupported"
+                ),
+            },
+        )
+
+        candidate, authority = challenge_package(
+            discharge_rows=(
+                (
+                    "discharge:repair",
+                    17,
+                    "repair",
+                    CheckResult.PASS,
+                    "cert:repair",
+                    19,
+                ),
+                (
+                    "discharge:mismatch",
+                    23,
+                    "recovery_witness",
+                    CheckResult.PASS,
+                    "cert:mismatch",
+                    29,
+                ),
+            ),
+        )
+        compiled = compile_package(validate_package(candidate, authority))
+
+        challenge_case = "__pff__:challenge-case(challenge:block@7)"
+        discharged = "__pff__:discharged(challenge:block@7)"
+        open_challenge = "__pff__:open-challenge(challenge:block@7)"
+        repair_match = "__pff__:type-match(discharge:repair@17)"
+        repair_case = "__pff__:discharge-case(discharge:repair@17)"
+        mismatch_match = "__pff__:type-match(discharge:mismatch@23)"
+        mismatch_case = "__pff__:discharge-case(discharge:mismatch@23)"
+        expected_atoms = {
+            challenge_case,
+            discharged,
+            open_challenge,
+            repair_match,
+            repair_case,
+            mismatch_match,
+            mismatch_case,
+        }
+        expected_rules = {
+            literal_rule(
+                "__pff__:challenge-case-rule(challenge:block@7)",
+                challenge_case,
+                positive={"__pff__:cert-valid(cert:block@13)"},
+            ),
+            literal_rule(
+                "__pff__:open-challenge-rule(challenge:block@7)",
+                open_challenge,
+                positive={
+                    challenge_case,
+                    "__pff__:closure-ready(closure:discharges@11)",
+                },
+                negative={discharged},
+            ),
+            literal_rule(
+                "__pff__:face-block-effect(challenge:block@7)",
+                "__pff__:has-open-challenge(face:target@5)",
+                positive={open_challenge},
+            ),
+            literal_rule(
+                "__pff__:discharge-case-rule(discharge:repair@17)",
+                repair_case,
+                positive={
+                    "__pff__:cert-valid(cert:repair@19)",
+                    repair_match,
+                },
+            ),
+            literal_rule(
+                "__pff__:discharged-bridge(discharge:repair@17)",
+                discharged,
+                positive={repair_case},
+            ),
+            literal_rule(
+                "__pff__:discharge-case-rule(discharge:mismatch@23)",
+                mismatch_case,
+                positive={
+                    "__pff__:cert-valid(cert:mismatch@29)",
+                    mismatch_match,
+                },
+            ),
+            literal_rule(
+                "__pff__:discharged-bridge(discharge:mismatch@23)",
+                discharged,
+                positive={mismatch_case},
+            ),
+        }
+        challenge_owner_refs = frozenset(
+            {
+                candidate.challenges[0].ref,
+                *(discharge.ref for discharge in candidate.discharges),
+            }
+        )
+        actual_origins = tuple(
+            origin
+            for origin in compiled.origins
+            if any(
+                source.ref in challenge_owner_refs
+                for source in origin.sources
+            )
+        )
+        expected_origins = {
+            literal_origin(
+                GroundArtifactKind.ATOM,
+                challenge_case,
+                CompilationRole.CHALLENGE_CASE,
+                RecordKind.CHALLENGE,
+                "challenge:block",
+                7,
+            ),
+            literal_origin(
+                GroundArtifactKind.ATOM,
+                discharged,
+                CompilationRole.DISCHARGED,
+                RecordKind.CHALLENGE,
+                "challenge:block",
+                7,
+            ),
+            literal_origin(
+                GroundArtifactKind.ATOM,
+                open_challenge,
+                CompilationRole.OPEN_CHALLENGE,
+                RecordKind.CHALLENGE,
+                "challenge:block",
+                7,
+            ),
+            literal_origin(
+                GroundArtifactKind.ATOM,
+                repair_match,
+                CompilationRole.TYPE_MATCH,
+                RecordKind.DISCHARGE,
+                "discharge:repair",
+                17,
+            ),
+            literal_origin(
+                GroundArtifactKind.ATOM,
+                repair_case,
+                CompilationRole.DISCHARGE_CASE,
+                RecordKind.DISCHARGE,
+                "discharge:repair",
+                17,
+            ),
+            literal_origin(
+                GroundArtifactKind.ATOM,
+                mismatch_match,
+                CompilationRole.TYPE_MATCH,
+                RecordKind.DISCHARGE,
+                "discharge:mismatch",
+                23,
+            ),
+            literal_origin(
+                GroundArtifactKind.ATOM,
+                mismatch_case,
+                CompilationRole.DISCHARGE_CASE,
+                RecordKind.DISCHARGE,
+                "discharge:mismatch",
+                23,
+            ),
+        }
+        for artifact, role in (
+            (
+                "__pff__:challenge-case-rule(challenge:block@7)",
+                CompilationRole.CHALLENGE_CASE_RULE,
+            ),
+            (
+                "__pff__:open-challenge-rule(challenge:block@7)",
+                CompilationRole.OPEN_CHALLENGE_RULE,
+            ),
+            (
+                "__pff__:face-block-effect(challenge:block@7)",
+                CompilationRole.FACE_BLOCK_EFFECT,
+            ),
+        ):
+            expected_origins.add(
+                literal_origin(
+                    GroundArtifactKind.RULE,
+                    artifact,
+                    role,
+                    RecordKind.CHALLENGE,
+                    "challenge:block",
+                    7,
+                )
+            )
+        for record_id, version in (
+            ("discharge:repair", 17),
+            ("discharge:mismatch", 23),
+        ):
+            expected_origins.update(
+                {
+                    literal_origin(
+                        GroundArtifactKind.RULE,
+                        f"__pff__:discharge-case-rule({record_id}@{version})",
+                        CompilationRole.DISCHARGE_CASE_RULE,
+                        RecordKind.DISCHARGE,
+                        record_id,
+                        version,
+                    ),
+                    literal_origin(
+                        GroundArtifactKind.RULE,
+                        f"__pff__:discharged-bridge({record_id}@{version})",
+                        CompilationRole.DISCHARGED_BRIDGE,
+                        RecordKind.DISCHARGE,
+                        record_id,
+                        version,
+                    ),
+                }
+            )
+
+        self.assertEqual(
+            {
+                origin.artifact_ref
+                for origin in actual_origins
+                if origin.artifact_kind is GroundArtifactKind.ATOM
+            },
+            expected_atoms,
+        )
+        self.assertEqual(
+            {
+                rule
+                for rule in compiled.program.rules
+                if rule.id
+                in {
+                    origin.artifact_ref
+                    for origin in actual_origins
+                    if origin.artifact_kind is GroundArtifactKind.RULE
+                }
+            },
+            expected_rules,
+        )
+        self.assertEqual(set(actual_origins), expected_origins)
+        self.assertEqual(len(actual_origins), 14)
+        self.assertTrue(all(len(origin.sources) == 1 for origin in actual_origins))
+        self.assertEqual(
+            expected_atoms & compiled.program.base_live,
+            {repair_match},
+        )
+        self.assertEqual(
+            expected_atoms & compiled.program.base_excluded,
+            {mismatch_match},
+        )
+        self.assertEqual(
+            expected_atoms & compiled.program.protected_open,
+            set(),
+        )
+        self.assertEqual(
+            compiled.origin_for(
+                GroundArtifactKind.ATOM,
+                "__pff__:has-open-challenge(face:target@5)",
+            ),
+            literal_origin(
+                GroundArtifactKind.ATOM,
+                "__pff__:has-open-challenge(face:target@5)",
+                CompilationRole.HAS_OPEN_CHALLENGE,
+                RecordKind.FACE,
+                "face:target",
+                5,
+            ),
+        )
+
+    def test_every_admitted_blocking_kind_uses_the_same_face_effect_branch(
+        self,
+    ) -> None:
+        expected_effect = literal_rule(
+            "__pff__:face-block-effect(challenge:block@7)",
+            "__pff__:has-open-challenge(face:target@5)",
+            positive={"__pff__:open-challenge(challenge:block@7)"},
+        )
+        cases = (
+            ("undercut", "frame"),
+            ("wound", "frame"),
+            ("localisation_gap", "localisation"),
+            ("recovery_gap", "recovery"),
+            ("closure_gap", "closure"),
+        )
+        for challenge_kind, face_kind in cases:
+            with self.subTest(challenge_kind=challenge_kind):
+                candidate, authority = challenge_package(
+                    challenge_kind=challenge_kind,
+                    face_kind=face_kind,
+                )
+                compiled = compile_package(
+                    validate_package(candidate, authority)
+                )
+
+                self.assertIn(expected_effect, compiled.program.rules)
+                self.assertEqual(
+                    compiled.origin_for(
+                        GroundArtifactKind.RULE,
+                        "__pff__:face-block-effect(challenge:block@7)",
+                    ),
+                    literal_origin(
+                        GroundArtifactKind.RULE,
+                        "__pff__:face-block-effect(challenge:block@7)",
+                        CompilationRole.FACE_BLOCK_EFFECT,
+                        RecordKind.CHALLENGE,
+                        "challenge:block",
+                        7,
+                    ),
+                )
+                self.assertNotIn(
+                    "__pff__:rebut-effect(challenge:block@7)",
+                    {str(rule.id) for rule in compiled.program.rules},
+                )
+
+    def test_rebut_effect_mirrors_open_challenge_without_blocking_target(
+        self,
+    ) -> None:
+        expected_effect = literal_rule(
+            "__pff__:rebut-effect(challenge:block@7)",
+            "atom:rebut-effect@31",
+            positive={"__pff__:open-challenge(challenge:block@7)"},
+        )
+        for certificate_result, expected_status in (
+            (CheckResult.PASS, Status.LIVE),
+            (CheckResult.FAIL, Status.EXCLUDED),
+            (CheckResult.OPEN, Status.SUSPENDED),
+        ):
+            with self.subTest(certificate_result=certificate_result):
+                candidate, authority = challenge_package(
+                    challenge_kind="rebut",
+                    challenge_result=certificate_result,
+                )
+                compiled = compile_package(
+                    validate_package(candidate, authority)
+                )
+                result = evaluate(compiled.program)
+
+                self.assertIn(expected_effect, compiled.program.rules)
+                self.assertEqual(
+                    result.status_of(
+                        "__pff__:open-challenge(challenge:block@7)"
+                    ),
+                    expected_status,
+                )
+                self.assertEqual(
+                    result.status_of("atom:rebut-effect@31"),
+                    expected_status,
+                )
+                self.assertEqual(
+                    result.status_of(
+                        "__pff__:has-open-challenge(face:target@5)"
+                    ),
+                    Status.EXCLUDED,
+                )
+                self.assertEqual(
+                    result.status_of("__pff__:clear(face:target@5)"),
+                    Status.LIVE,
+                )
+                self.assertEqual(
+                    result.status_of("atom:derived@1"),
+                    Status.LIVE,
+                )
+                self.assertEqual(
+                    compiled.origin_for(
+                        GroundArtifactKind.RULE,
+                        "__pff__:rebut-effect(challenge:block@7)",
+                    ),
+                    literal_origin(
+                        GroundArtifactKind.RULE,
+                        "__pff__:rebut-effect(challenge:block@7)",
+                        CompilationRole.REBUT_EFFECT,
+                        RecordKind.CHALLENGE,
+                        "challenge:block",
+                        7,
+                    ),
+                )
+
+    def test_all_eleven_status_rows_match_the_accepted_table(self) -> None:
+        rows = (
+            (
+                "challenge-pass-no-discharge",
+                CheckResult.PASS,
+                CheckResult.PASS,
+                None,
+                None,
+                (Status.LIVE, Status.EXCLUDED, Status.LIVE, Status.LIVE, Status.EXCLUDED, Status.EXCLUDED),
+            ),
+            (
+                "challenge-fail",
+                CheckResult.FAIL,
+                CheckResult.PASS,
+                None,
+                None,
+                (Status.EXCLUDED, Status.EXCLUDED, Status.EXCLUDED, Status.EXCLUDED, Status.LIVE, Status.LIVE),
+            ),
+            (
+                "challenge-open",
+                CheckResult.OPEN,
+                CheckResult.PASS,
+                None,
+                None,
+                (Status.SUSPENDED, Status.EXCLUDED, Status.SUSPENDED, Status.SUSPENDED, Status.SUSPENDED, Status.SUSPENDED),
+            ),
+            (
+                "closure-fail",
+                CheckResult.PASS,
+                CheckResult.FAIL,
+                None,
+                None,
+                (Status.LIVE, Status.EXCLUDED, Status.SUSPENDED, Status.SUSPENDED, Status.SUSPENDED, Status.SUSPENDED),
+            ),
+            (
+                "closure-open",
+                CheckResult.PASS,
+                CheckResult.OPEN,
+                None,
+                None,
+                (Status.LIVE, Status.EXCLUDED, Status.SUSPENDED, Status.SUSPENDED, Status.SUSPENDED, Status.SUSPENDED),
+            ),
+            (
+                "compatible-pass",
+                CheckResult.PASS,
+                CheckResult.PASS,
+                "repair",
+                CheckResult.PASS,
+                (Status.LIVE, Status.LIVE, Status.EXCLUDED, Status.EXCLUDED, Status.LIVE, Status.LIVE),
+            ),
+            (
+                "compatible-fail",
+                CheckResult.PASS,
+                CheckResult.PASS,
+                "repair",
+                CheckResult.FAIL,
+                (Status.LIVE, Status.EXCLUDED, Status.LIVE, Status.LIVE, Status.EXCLUDED, Status.EXCLUDED),
+            ),
+            (
+                "compatible-open",
+                CheckResult.PASS,
+                CheckResult.PASS,
+                "repair",
+                CheckResult.OPEN,
+                (Status.LIVE, Status.SUSPENDED, Status.SUSPENDED, Status.SUSPENDED, Status.SUSPENDED, Status.SUSPENDED),
+            ),
+            (
+                "incompatible-pass",
+                CheckResult.PASS,
+                CheckResult.PASS,
+                "recovery_witness",
+                CheckResult.PASS,
+                (Status.LIVE, Status.EXCLUDED, Status.LIVE, Status.LIVE, Status.EXCLUDED, Status.EXCLUDED),
+            ),
+            (
+                "incompatible-open",
+                CheckResult.PASS,
+                CheckResult.PASS,
+                "recovery_witness",
+                CheckResult.OPEN,
+                (Status.LIVE, Status.EXCLUDED, Status.LIVE, Status.LIVE, Status.EXCLUDED, Status.EXCLUDED),
+            ),
+            (
+                "challenge-open-compatible-pass",
+                CheckResult.OPEN,
+                CheckResult.PASS,
+                "repair",
+                CheckResult.PASS,
+                (Status.SUSPENDED, Status.LIVE, Status.EXCLUDED, Status.EXCLUDED, Status.LIVE, Status.LIVE),
+            ),
+        )
+        status_atoms = (
+            "__pff__:challenge-case(challenge:block@7)",
+            "__pff__:discharged(challenge:block@7)",
+            "__pff__:open-challenge(challenge:block@7)",
+            "__pff__:has-open-challenge(face:target@5)",
+            "__pff__:clear(face:target@5)",
+            "atom:derived@1",
+        )
+        for (
+            label,
+            challenge_result,
+            closure_result,
+            discharge_kind,
+            discharge_result,
+            expected,
+        ) in rows:
+            with self.subTest(label=label):
+                discharge_rows: tuple[DischargeFixture, ...] = ()
+                if discharge_kind is not None and discharge_result is not None:
+                    discharge_rows = (
+                        (
+                            "discharge:row",
+                            17,
+                            discharge_kind,
+                            discharge_result,
+                            "cert:row",
+                            19,
+                        ),
+                    )
+                candidate, authority = challenge_package(
+                    challenge_result=challenge_result,
+                    discharge_closure_result=closure_result,
+                    discharge_rows=discharge_rows,
+                )
+
+                evaluation = evaluate(
+                    compile_package(
+                        validate_package(candidate, authority)
+                    ).program
+                )
+
+                self.assertEqual(
+                    tuple(evaluation.status_of(atom_id) for atom_id in status_atoms),
+                    expected,
+                )
+
+    def test_multiple_discharges_are_alternative_bridges_not_conjuncts(self) -> None:
+        cases = (
+            (
+                "any-live",
+                (
+                    ("discharge:first", 17, "repair", CheckResult.PASS, "cert:first", 19),
+                    ("discharge:second", 23, "malformed_or_inapplicable", CheckResult.FAIL, "cert:second", 29),
+                ),
+                Status.LIVE,
+                Status.EXCLUDED,
+                Status.LIVE,
+            ),
+            (
+                "suspended-without-live",
+                (
+                    ("discharge:first", 17, "repair", CheckResult.OPEN, "cert:first", 19),
+                    ("discharge:second", 23, "malformed_or_inapplicable", CheckResult.FAIL, "cert:second", 29),
+                ),
+                Status.SUSPENDED,
+                Status.SUSPENDED,
+                Status.SUSPENDED,
+            ),
+            (
+                "all-excluded",
+                (
+                    ("discharge:first", 17, "repair", CheckResult.FAIL, "cert:first", 19),
+                    ("discharge:second", 23, "recovery_witness", CheckResult.PASS, "cert:second", 29),
+                ),
+                Status.EXCLUDED,
+                Status.LIVE,
+                Status.EXCLUDED,
+            ),
+        )
+        for label, discharge_rows, discharged_status, open_status, head_status in cases:
+            with self.subTest(label=label):
+                candidate, authority = challenge_package(
+                    discharge_rows=discharge_rows,
+                )
+                compiled = compile_package(
+                    validate_package(candidate, authority)
+                )
+                evaluation = evaluate(compiled.program)
+                bridges = {
+                    rule
+                    for rule in compiled.program.rules
+                    if str(rule.id).startswith("__pff__:discharged-bridge(")
+                }
+
+                self.assertEqual(
+                    bridges,
+                    {
+                        literal_rule(
+                            "__pff__:discharged-bridge(discharge:first@17)",
+                            "__pff__:discharged(challenge:block@7)",
+                            positive={
+                                "__pff__:discharge-case(discharge:first@17)"
+                            },
+                        ),
+                        literal_rule(
+                            "__pff__:discharged-bridge(discharge:second@23)",
+                            "__pff__:discharged(challenge:block@7)",
+                            positive={
+                                "__pff__:discharge-case(discharge:second@23)"
+                            },
+                        ),
+                    },
+                )
+                self.assertEqual(
+                    evaluation.status_of(
+                        "__pff__:discharged(challenge:block@7)"
+                    ),
+                    discharged_status,
+                )
+                self.assertEqual(
+                    evaluation.status_of(
+                        "__pff__:open-challenge(challenge:block@7)"
+                    ),
+                    open_status,
+                )
+                self.assertEqual(
+                    evaluation.status_of("atom:derived@1"),
+                    head_status,
+                )
+
+    def test_versions_permutations_and_unrelated_insertion_preserve_owner_slice(
+        self,
+    ) -> None:
+        candidate, authority = challenge_package(
+            discharge_rows=(
+                ("discharge:repair", 17, "repair", CheckResult.PASS, "cert:repair", 19),
+                ("discharge:mismatch", 23, "recovery_witness", CheckResult.PASS, "cert:mismatch", 29),
+            ),
+        )
+        original_owners = frozenset(
+            {
+                candidate.challenges[0].ref,
+                *(discharge.ref for discharge in candidate.discharges),
+            }
+        )
+        original = compile_package(validate_package(candidate, authority))
+        permuted = replace(
+            candidate,
+            atoms=tuple(reversed(candidate.atoms)),
+            rules=tuple(reversed(candidate.rules)),
+            faces=tuple(reversed(candidate.faces)),
+            certificates=tuple(reversed(candidate.certificates)),
+            closures=tuple(reversed(candidate.closures)),
+            challenges=tuple(reversed(candidate.challenges)),
+            discharges=tuple(reversed(candidate.discharges)),
+            header=replace(
+                candidate.header,
+                parent_package_hash="sha256:challenge-permutation",
+                metadata={"order": [29, 5, 13, 7]},
+            ),
+        )
+        reordered = compile_package(validate_package(permuted, authority))
+        self.assertEqual(
+            owned_challenge_slice(reordered, original_owners),
+            owned_challenge_slice(original, original_owners),
+        )
+
+        unrelated = ChallengeRecord(
+            id="challenge:aaa-unrelated",
+            version=3,
+            kind="undercut",
+            target_kind=RecordKind.FACE,
+            target=candidate.faces[0].ref,
+            certificate=ref("cert:unrelated", 4),
+            discharge_closure=ref("closure:unrelated", 6),
+        )
+        unrelated_certificate = replace(
+            certificate(
+                "cert:unrelated",
+                "challenge-witness/v1",
+                unrelated.ref,
+            ),
+            version=4,
+        )
+        unrelated_closure = ClosureRecord(
+            id="closure:unrelated",
+            version=6,
+            checker=SUPPLIED_CLOSURE_CHECKER,
+            result=CheckResult.PASS,
+            cut_id="cut:1",
+            frame="frame:1",
+            selector=Selector(
+                record_type=RecordKind.DISCHARGE,
+                where={"challenge": unrelated.ref},
+            ),
+        )
+        inserted_candidate = replace(
+            candidate,
+            challenges=(unrelated, *candidate.challenges),
+            certificates=(*candidate.certificates, unrelated_certificate),
+            closures=(*candidate.closures, unrelated_closure),
+        )
+        inserted = compile_package(
+            validate_package(inserted_candidate, authority)
+        )
+
+        self.assertEqual(
+            owned_challenge_slice(inserted, original_owners),
+            owned_challenge_slice(original, original_owners),
+        )
+        for literal in (
+            "__pff__:challenge-case(challenge:block@7)",
+            "__pff__:type-match(discharge:repair@17)",
+            "__pff__:discharge-case(discharge:mismatch@23)",
+            "__pff__:open-challenge-rule(challenge:block@7)",
+        ):
+            artifact_kind = (
+                GroundArtifactKind.RULE
+                if "-rule(" in literal
+                else GroundArtifactKind.ATOM
+            )
+            self.assertEqual(
+                inserted.origin_for(artifact_kind, literal),
+                original.origin_for(artifact_kind, literal),
+            )
+
+
 class IdentityDeterminismAndContraryTests(unittest.TestCase):
     def test_base_versions_order_and_metadata_do_not_change_artifacts(self) -> None:
         source_v1 = atom(
@@ -1351,99 +2455,61 @@ class CapabilityAndBoundaryTests(unittest.TestCase):
                 with self.assertRaises(TypeError):
                     compile_package(candidate)  # type: ignore[arg-type]
 
-    def test_faces_are_accepted_while_pending_records_fail_per_record(self) -> None:
-        candidate = linked_valid_package()
-        original_challenge = candidate.challenges[0]
-        original_discharge = candidate.discharges[0]
-        second_challenge = ChallengeRecord(
-            id="challenge:a-second",
-            version=1,
-            kind="undercut",
-            target_kind=RecordKind.FACE,
-            target=candidate.faces[0].ref,
-            certificate=ref("cert:challenge-second"),
-            discharge_closure=ref("closure:discharges-second"),
-        )
-        second_discharge = DischargeRecord(
-            id="discharge:z-second",
-            version=1,
-            challenge=second_challenge.ref,
-            kind="repair",
-            certificate=ref("cert:discharge-second"),
-        )
-        blocker_closure = replace(
-            candidate.closures[0],
-            members=(original_challenge.ref, second_challenge.ref),
-        )
-        second_discharge_closure = ClosureRecord(
-            id="closure:discharges-second",
-            version=1,
-            checker="materialised-selector/v1",
-            result=CheckResult.PASS,
-            cut_id="cut:1",
-            frame="frame:1",
-            selector=Selector(
-                record_type=RecordKind.DISCHARGE,
-                where={"challenge": second_challenge.ref},
-            ),
-            members=(second_discharge.ref,),
-        )
-        candidate = replace(
+    def test_deferred_challenges_preflight_once_per_root_without_cascades(
+        self,
+    ) -> None:
+        candidate, authority, expected = unsupported_challenge_package()
+        candidates = (
             candidate,
-            challenges=(original_challenge, second_challenge),
-            discharges=(second_discharge, original_discharge),
-            certificates=(
-                *candidate.certificates,
-                certificate(
-                    "cert:challenge-second",
-                    "challenge-witness/v1",
-                    second_challenge.ref,
-                ),
-                certificate(
-                    "cert:discharge-second",
-                    "discharge-witness/v1",
-                    second_discharge.ref,
-                ),
-            ),
-            closures=(
-                second_discharge_closure,
-                candidate.closures[1],
-                blocker_closure,
+            replace(
+                candidate,
+                certificates=tuple(reversed(candidate.certificates)),
+                closures=tuple(reversed(candidate.closures)),
+                challenges=tuple(reversed(candidate.challenges)),
+                discharges=tuple(reversed(candidate.discharges)),
             ),
         )
-        source = validate_package(candidate, catalog())
+        for position, ordered in enumerate(candidates):
+            with self.subTest(position=position):
+                source = validate_package(ordered, authority)
+                with (
+                    patch.object(
+                        compile_module,
+                        "_CompilationBuilder",
+                        side_effect=AssertionError("partial builder constructed"),
+                    ) as builder,
+                    self.assertRaises(PackageCompilationError) as caught,
+                ):
+                    compile_package(source)
 
-        with self.assertRaises(PackageCompilationError) as caught:
-            compile_package(source)
-
-        self.assertEqual(
-            caught.exception.issues,
-            (
-                CompilationIssue(
-                    code=CompilationCode.UNSUPPORTED_RECORD_KIND,
-                    record_kind=RecordKind.CHALLENGE,
-                    ref=second_challenge.ref,
-                ),
-                CompilationIssue(
-                    code=CompilationCode.UNSUPPORTED_RECORD_KIND,
-                    record_kind=RecordKind.CHALLENGE,
-                    ref=original_challenge.ref,
-                ),
-                CompilationIssue(
-                    code=CompilationCode.UNSUPPORTED_RECORD_KIND,
-                    record_kind=RecordKind.DISCHARGE,
-                    ref=original_discharge.ref,
-                ),
-                CompilationIssue(
-                    code=CompilationCode.UNSUPPORTED_RECORD_KIND,
-                    record_kind=RecordKind.DISCHARGE,
-                    ref=second_discharge.ref,
-                ),
-            ),
-        )
+                self.assertEqual(caught.exception.issues, expected)
+                self.assertEqual(len(caught.exception.issues), 5)
+                self.assertTrue(
+                    all(
+                        issue.record_kind is RecordKind.CHALLENGE
+                        for issue in caught.exception.issues
+                    )
+                )
+                self.assertNotIn(
+                    CompilationCode.UNSUPPORTED_RECORD_KIND,
+                    {issue.code for issue in caught.exception.issues},
+                )
+                builder.assert_not_called()
 
     def test_compiler_does_not_call_validation_checker_or_evaluator(self) -> None:
-        source = validated(face_package())
+        candidate, authority = challenge_package(
+            discharge_rows=(
+                (
+                    "discharge:repair",
+                    17,
+                    "repair",
+                    CheckResult.PASS,
+                    "cert:repair",
+                    19,
+                ),
+            ),
+        )
+        source = validate_package(candidate, authority)
         ground_evaluate_module = importlib.import_module("poietics.ground.evaluate")
 
         with (
@@ -1498,9 +2564,11 @@ class CapabilityAndBoundaryTests(unittest.TestCase):
             for name in (
                 "AtomRecord",
                 "CertificateRecord",
+                "ChallengeRecord",
                 "CheckResult",
                 "ClosureRecord",
                 "ContraryRecord",
+                "DischargeRecord",
                 "FaceRecord",
                 "RecordKind",
                 "RecordRef",

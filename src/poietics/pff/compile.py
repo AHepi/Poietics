@@ -6,10 +6,9 @@ reads already-bound checker outcomes, and constructs an immutable ground
 program plus a deterministic source map.  It does not execute checkers,
 providers, parsers, or the ground evaluator.
 
-The current bounded slice implements certificate and closure gates, source
-base transfer, explicit contrary carriage, face clearance, and face-guarded
-user rules.  Challenges and discharges fail closed with typed feature
-diagnostics until their lowering rules are admitted by a later compiler slice.
+The current bounded slice also implements the admitted challenge/discharge
+gates and effects.  Challenge semantics that remain underspecified fail closed
+with challenge-rooted diagnostics before construction begins.
 """
 
 from __future__ import annotations
@@ -23,9 +22,11 @@ from ..ground.model import AtomRef, GroundProgram, GroundRule, RuleRef
 from .model import (
     AtomRecord,
     CertificateRecord,
+    ChallengeRecord,
     CheckResult,
     ClosureRecord,
     ContraryRecord,
+    DischargeRecord,
     FaceRecord,
     RecordKind,
     RecordRef,
@@ -55,15 +56,64 @@ class CompilationRole(StrEnum):
     HAS_OPEN_CHALLENGE = "has-open-challenge"
     CLEAR = "clear"
     LIVE_CASE = "live-case"
+    CHALLENGE_CASE = "challenge-case"
+    DISCHARGED = "discharged"
+    OPEN_CHALLENGE = "open-challenge"
+    TYPE_MATCH = "type-match"
+    DISCHARGE_CASE = "discharge-case"
     RULE_CASE = "rule-case"
     HEAD_BRIDGE = "head-bridge"
     CLEAR_FACE = "clear-face"
+    CHALLENGE_CASE_RULE = "challenge-case-rule"
+    DISCHARGE_CASE_RULE = "discharge-case-rule"
+    DISCHARGED_BRIDGE = "discharged-bridge"
+    OPEN_CHALLENGE_RULE = "open-challenge-rule"
+    REBUT_EFFECT = "rebut-effect"
+    FACE_BLOCK_EFFECT = "face-block-effect"
 
 
 class CompilationCode(StrEnum):
     """Typed compiler diagnostics that do not assign semantic status."""
 
+    # Retained for callers that construct legacy issues.  The compiler no
+    # longer emits this blanket diagnostic for challenge/discharge records.
     UNSUPPORTED_RECORD_KIND = "unsupported_record_kind"
+    RULE_TARGET_BLOCKING_UNSUPPORTED = "rule_target_blocking_unsupported"
+    REVOCATION_SELECTION_UNSUPPORTED = "revocation_selection_unsupported"
+    CURRENTNESS_TARGET_UNSUPPORTED = "currentness_target_unsupported"
+    PROBLEM_FACE_LIFECYCLE_UNSUPPORTED = "problem_face_lifecycle_unsupported"
+    CHALLENGE_EFFECT_UNSUPPORTED = "challenge_effect_unsupported"
+
+
+_CHALLENGE_CODE_RANK: Mapping[CompilationCode, int] = MappingProxyType(
+    {
+        CompilationCode.REVOCATION_SELECTION_UNSUPPORTED: 0,
+        CompilationCode.CURRENTNESS_TARGET_UNSUPPORTED: 1,
+        CompilationCode.PROBLEM_FACE_LIFECYCLE_UNSUPPORTED: 2,
+        CompilationCode.RULE_TARGET_BLOCKING_UNSUPPORTED: 3,
+        CompilationCode.CHALLENGE_EFFECT_UNSUPPORTED: 4,
+    }
+)
+_DEFERRED_CHALLENGE_CODES: Mapping[str, CompilationCode] = MappingProxyType(
+    {
+        "revoke": CompilationCode.REVOCATION_SELECTION_UNSUPPORTED,
+        "currentness_gap": CompilationCode.CURRENTNESS_TARGET_UNSUPPORTED,
+        "defect": CompilationCode.PROBLEM_FACE_LIFECYCLE_UNSUPPORTED,
+    }
+)
+_FACE_BLOCKING_CHALLENGE_KINDS = frozenset(
+    {
+        "undercut",
+        "wound",
+        "localisation_gap",
+        "recovery_gap",
+        "closure_gap",
+    }
+)
+_RULE_TARGET_BLOCKING_KINDS = frozenset({"undercut", "wound"})
+_COMPILER_MAPPED_CHALLENGE_KINDS = frozenset(
+    {"rebut", *_FACE_BLOCKING_CHALLENGE_KINDS}
+)
 
 
 _ATOM_ROLES = frozenset(
@@ -78,6 +128,11 @@ _ATOM_ROLES = frozenset(
         CompilationRole.HAS_OPEN_CHALLENGE,
         CompilationRole.CLEAR,
         CompilationRole.LIVE_CASE,
+        CompilationRole.CHALLENGE_CASE,
+        CompilationRole.DISCHARGED,
+        CompilationRole.OPEN_CHALLENGE,
+        CompilationRole.TYPE_MATCH,
+        CompilationRole.DISCHARGE_CASE,
     }
 )
 _RULE_ROLES = frozenset(
@@ -85,8 +140,15 @@ _RULE_ROLES = frozenset(
         CompilationRole.RULE_CASE,
         CompilationRole.HEAD_BRIDGE,
         CompilationRole.CLEAR_FACE,
+        CompilationRole.CHALLENGE_CASE_RULE,
+        CompilationRole.DISCHARGE_CASE_RULE,
+        CompilationRole.DISCHARGED_BRIDGE,
+        CompilationRole.OPEN_CHALLENGE_RULE,
+        CompilationRole.REBUT_EFFECT,
+        CompilationRole.FACE_BLOCK_EFFECT,
     }
 )
+# Kept only to preserve construction of the legacy public issue shape.
 _PENDING_KINDS = (
     RecordKind.CHALLENGE,
     RecordKind.DISCHARGE,
@@ -226,17 +288,33 @@ class CompilationIssue:
             raise TypeError("compilation issue code must be exact")
         if type(self.record_kind) is not RecordKind:
             raise TypeError("compilation issue record kind must be exact")
-        if self.record_kind not in _PENDING_KINDS:
-            raise ValueError("unsupported-record issue requires a pending record kind")
+        if self.code is CompilationCode.UNSUPPORTED_RECORD_KIND:
+            if self.record_kind not in _PENDING_KINDS:
+                raise ValueError(
+                    "unsupported-record issue requires a pending record kind"
+                )
+        elif self.record_kind is not RecordKind.CHALLENGE:
+            raise ValueError("challenge feature issue requires a challenge record")
         _require_record_ref(self.ref)
 
 
-def _issue_key(issue: CompilationIssue) -> tuple[int, str, int, str]:
+def _issue_key(issue: CompilationIssue) -> tuple[object, ...]:
+    if issue.code is CompilationCode.UNSUPPORTED_RECORD_KIND:
+        return (
+            1,
+            _PENDING_KIND_ORDER.get(
+                issue.record_kind,
+                len(_PENDING_KIND_ORDER),
+            ),
+            issue.ref.id,
+            issue.ref.version,
+            issue.code.value,
+        )
     return (
-        _PENDING_KIND_ORDER.get(issue.record_kind, len(_PENDING_KIND_ORDER)),
+        0,
         issue.ref.id,
         issue.ref.version,
-        issue.code.value,
+        _CHALLENGE_CODE_RANK[issue.code],
     )
 
 
@@ -474,14 +552,28 @@ class _CompilationBuilder:
         )
 
 
-def _pending_issues(source: ValidatedPackage) -> tuple[CompilationIssue, ...]:
+def _challenge_issues(source: ValidatedPackage) -> tuple[CompilationIssue, ...]:
     issues: list[CompilationIssue] = []
-    for kind in _PENDING_KINDS:
-        for record in source.records(kind):
+    for raw_record in source.records(RecordKind.CHALLENGE):
+        record = cast(ChallengeRecord, raw_record)
+        code = _DEFERRED_CHALLENGE_CODES.get(record.kind)
+        if code is None and record.kind not in _COMPILER_MAPPED_CHALLENGE_KINDS:
+            if record.kind not in source.registry.known_challenge_kinds:
+                raise AssertionError(
+                    "validated package contains an unknown challenge kind"
+                )
+            code = CompilationCode.CHALLENGE_EFFECT_UNSUPPORTED
+        if (
+            code is None
+            and record.kind in _RULE_TARGET_BLOCKING_KINDS
+            and record.target_kind is RecordKind.RULE
+        ):
+            code = CompilationCode.RULE_TARGET_BLOCKING_UNSUPPORTED
+        if code is not None:
             issues.append(
                 CompilationIssue(
-                    code=CompilationCode.UNSUPPORTED_RECORD_KIND,
-                    record_kind=kind,
+                    code=code,
+                    record_kind=RecordKind.CHALLENGE,
                     ref=record.ref,
                 )
             )
@@ -667,17 +759,187 @@ def _compile_rules(builder: _CompilationBuilder) -> None:
         )
 
 
+def _compile_challenges(builder: _CompilationBuilder) -> None:
+    for raw_record in builder.source.records(RecordKind.CHALLENGE):
+        record = cast(ChallengeRecord, raw_record)
+        challenge_case = _generated_atom(
+            CompilationRole.CHALLENGE_CASE,
+            record.ref,
+        )
+        discharged = _generated_atom(
+            CompilationRole.DISCHARGED,
+            record.ref,
+        )
+        open_challenge = _generated_atom(
+            CompilationRole.OPEN_CHALLENGE,
+            record.ref,
+        )
+        for atom, role in (
+            (challenge_case, CompilationRole.CHALLENGE_CASE),
+            (discharged, CompilationRole.DISCHARGED),
+            (open_challenge, CompilationRole.OPEN_CHALLENGE),
+        ):
+            builder.add_atom(
+                atom,
+                role=role,
+                source_kind=RecordKind.CHALLENGE,
+                source_ref=record.ref,
+            )
+
+        builder.add_rule(
+            GroundRule(
+                id=_generated_rule(
+                    CompilationRole.CHALLENGE_CASE_RULE,
+                    record.ref,
+                ),
+                head=challenge_case,
+                positive=frozenset(
+                    {
+                        _generated_atom(
+                            CompilationRole.CERT_VALID,
+                            record.certificate,
+                        )
+                    }
+                ),
+            ),
+            role=CompilationRole.CHALLENGE_CASE_RULE,
+            source_kind=RecordKind.CHALLENGE,
+            source_ref=record.ref,
+        )
+        builder.add_rule(
+            GroundRule(
+                id=_generated_rule(
+                    CompilationRole.OPEN_CHALLENGE_RULE,
+                    record.ref,
+                ),
+                head=open_challenge,
+                positive=frozenset(
+                    {
+                        challenge_case,
+                        _generated_atom(
+                            CompilationRole.CLOSURE_READY,
+                            record.discharge_closure,
+                        ),
+                    }
+                ),
+                negative=frozenset({discharged}),
+            ),
+            role=CompilationRole.OPEN_CHALLENGE_RULE,
+            source_kind=RecordKind.CHALLENGE,
+            source_ref=record.ref,
+        )
+
+        if record.kind == "rebut":
+            if record.contrary_atom is None:  # pragma: no cover - validated.
+                raise AssertionError("validated rebut has no contrary atom")
+            effect_head = _source_atom(record.contrary_atom)
+            effect_role = CompilationRole.REBUT_EFFECT
+        elif record.kind in _FACE_BLOCKING_CHALLENGE_KINDS:
+            effect_head = _generated_atom(
+                CompilationRole.HAS_OPEN_CHALLENGE,
+                record.target,
+            )
+            effect_role = CompilationRole.FACE_BLOCK_EFFECT
+        else:  # pragma: no cover - preflight rejects every other kind.
+            raise AssertionError(f"unhandled challenge kind: {record.kind!r}")
+
+        builder.add_rule(
+            GroundRule(
+                id=_generated_rule(effect_role, record.ref),
+                head=effect_head,
+                positive=frozenset({open_challenge}),
+            ),
+            role=effect_role,
+            source_kind=RecordKind.CHALLENGE,
+            source_ref=record.ref,
+        )
+
+
+def _compile_discharges(builder: _CompilationBuilder) -> None:
+    for raw_record in builder.source.records(RecordKind.DISCHARGE):
+        record = cast(DischargeRecord, raw_record)
+        challenge = cast(
+            ChallengeRecord,
+            builder.source.resolve(record.challenge, RecordKind.CHALLENGE),
+        )
+        type_match = _generated_atom(
+            CompilationRole.TYPE_MATCH,
+            record.ref,
+        )
+        discharge_case = _generated_atom(
+            CompilationRole.DISCHARGE_CASE,
+            record.ref,
+        )
+        for atom, role in (
+            (type_match, CompilationRole.TYPE_MATCH),
+            (discharge_case, CompilationRole.DISCHARGE_CASE),
+        ):
+            builder.add_atom(
+                atom,
+                role=role,
+                source_kind=RecordKind.DISCHARGE,
+                source_ref=record.ref,
+            )
+
+        compatible = builder.source.registry.is_discharge_compatible(
+            challenge_kind=challenge.kind,
+            discharge_kind=record.kind,
+        )
+        if compatible:
+            builder.mark_live(type_match)
+        else:
+            builder.mark_excluded(type_match)
+
+        builder.add_rule(
+            GroundRule(
+                id=_generated_rule(
+                    CompilationRole.DISCHARGE_CASE_RULE,
+                    record.ref,
+                ),
+                head=discharge_case,
+                positive=frozenset(
+                    {
+                        _generated_atom(
+                            CompilationRole.CERT_VALID,
+                            record.certificate,
+                        ),
+                        type_match,
+                    }
+                ),
+            ),
+            role=CompilationRole.DISCHARGE_CASE_RULE,
+            source_kind=RecordKind.DISCHARGE,
+            source_ref=record.ref,
+        )
+        builder.add_rule(
+            GroundRule(
+                id=_generated_rule(
+                    CompilationRole.DISCHARGED_BRIDGE,
+                    record.ref,
+                ),
+                head=_generated_atom(
+                    CompilationRole.DISCHARGED,
+                    challenge.ref,
+                ),
+                positive=frozenset({discharge_case}),
+            ),
+            role=CompilationRole.DISCHARGED_BRIDGE,
+            source_kind=RecordKind.DISCHARGE,
+            source_ref=record.ref,
+        )
+
+
 def compile_package(source: ValidatedPackage) -> Compilation:
     """Compile one validated package through the sole deterministic path.
 
-    Unsupported richer records are reported before any ground artifact is
-    returned.  A successful result is immutable and contains no evaluation.
+    Unsupported challenge effects are reported before builder construction.
+    A successful result is immutable and contains no evaluation.
     """
 
     if type(source) is not ValidatedPackage:
         raise TypeError("source must be an exact ValidatedPackage")
 
-    issues = _pending_issues(source)
+    issues = _challenge_issues(source)
     if issues:
         raise PackageCompilationError(issues)
 
@@ -688,6 +950,8 @@ def compile_package(source: ValidatedPackage) -> Compilation:
     _compile_faces(builder)
     _compile_contraries(builder)
     _compile_rules(builder)
+    _compile_challenges(builder)
+    _compile_discharges(builder)
     return builder.build()
 
 
