@@ -4,22 +4,24 @@ Poietics is being built around the narrow waist of the Poietic Faceted
 Fixpoint: a typed admission boundary followed by a deterministic well-founded
 evaluator over a finite ground program.
 
-The implemented core now includes immutable generation capture, strict
-provider-neutral draft extraction, immutable package candidates, an exact
-code-owned predicate registry, deterministic validation, opaque ground atom
-references, deterministic certificate and closure gate compilation,
-deterministic face clearance and face-guarded rule compilation, generic
-challenge and discharge case gates, registry-owned `type-match` placement,
-admitted challenge effects, immutable ground rules, initial live and excluded
-sets, a protected-open set, and the fixed-point evaluation specified by PFF Core
-v0.1. Its statuses are package-relative computational results. They are not
-truth, acceptance, support, confidence, or probability judgements.
+The implemented core now includes immutable generation capture, a pure Ollama
+adapter over an injected byte transport, strict provider-neutral draft
+extraction, immutable package candidates, an exact code-owned predicate
+registry, deterministic validation, opaque ground atom references,
+deterministic certificate and closure gate compilation, deterministic face
+clearance and face-guarded rule compilation, generic challenge and discharge
+case gates, registry-owned `type-match` placement, admitted challenge effects,
+immutable ground rules, initial live and excluded sets, a protected-open set,
+and the fixed-point evaluation specified by PFF Core v0.1. Its statuses are
+package-relative computational results. They are not truth, acceptance,
+support, confidence, or probability judgements.
 
 ## Current seam
 
 | Layer | Current responsibility | Explicitly outside the layer |
 |---|---|---|
 | `poietics.generation.model` | Immutable prompt/response capture, attempt lineage, and untrusted draft records | Provider calls, prompt construction, package authority, checking, and evaluation |
+| `poietics.generation.ollama` | Build exact non-streaming `/api/generate` request bytes for a code-owned local or cloud endpoint, invoke one injected byte transport exactly once without retry, strictly validate the response, and return a `GenerationEnvelope` | Concrete HTTP, authentication or API-key loading, provider SDKs, automatic extraction, package binding, and evaluation |
 | `poietics.generation.extract` | Strictly extract one delimited `pff-draft/0.1` JSON object from retained prose and return typed deterministic diagnostics | Heuristic prose interpretation, repair, package binding, checker execution, and provider calls |
 | `poietics.pff.model` | Deeply immutable typed package candidates and exact references | Parsing, registry meaning, semantic status, and compilation |
 | `poietics.pff.registry` | Exact immutable predicate, checker-shape, and policy contracts | Provider calls, checker execution, mutable registration, and manifest loading |
@@ -30,13 +32,15 @@ truth, acceptance, support, confidence, or probability judgements.
 | `poietics.ground.evaluate` | One authoritative fixed-point path | Domain interpretation, provenance, replay, and incremental evaluation |
 | Future explanation layer | Combine source maps and contraries with an `Evaluation` | Persisting or inventing verdicts |
 
-The dependency direction is intentionally one-way: an upstream producer may
-supply untrusted candidate material; capture retains its exact bytes and strict
-extraction may mint only a `DraftPackage`. A future trusted binder will create
-the immutable `Package`. Validation binds that package to one exact registry
-and mints a `ValidatedPackage`; the compiler creates a `Compilation` containing
-a `GroundProgram`; the ground evaluator derives an `Evaluation`. Rule indexes
-and statuses are always recomputed and are never stored as authority.
+The dependency direction is intentionally one-way: the Ollama adapter can use
+only a caller-supplied byte transport and the provider-neutral capture model.
+It returns an immutable `GenerationEnvelope`, and only a later explicit call to
+`extract_draft` may interpret its assistant bytes as an untrusted
+`DraftPackage`. A future trusted binder will create the immutable `Package`.
+Validation binds that package to one exact registry and mints a
+`ValidatedPackage`; the compiler creates a `Compilation` containing a
+`GroundProgram`; the ground evaluator derives an `Evaluation`. Rule indexes and
+statuses are always recomputed and are never stored as authority.
 
 ## Compiler boundary
 
@@ -112,12 +116,20 @@ package record kinds.
 ## Generator placement
 
 The intended conjecture generator for this system is an LLM. The implemented
-provider-neutral boundary captures the exact prompt, public request metadata,
-raw response bytes, provider/model identity, and attempt lineage. It then
-strictly extracts one `pff-draft/0.1` JSON object between exact marker lines.
-Arbitrary prose before and after that block is preserved for replay but remains
-semantically inert; missing, duplicated, malformed, oversized, or unresolved
-blocks fail with deterministic typed diagnostics rather than heuristic repair.
+Ollama adapter selects one of two code-owned `/api/generate` endpoints (local or
+cloud), constructs exact non-streaming JSON request bytes, and calls an injected
+byte transport once with no retry. It strictly gates HTTP status, body size,
+UTF-8, JSON structure, provider errors, response shape, and completion before
+returning a `GenerationEnvelope`. Only the decoded Ollama `response` string
+crosses the capture boundary as assistant bytes; the HTTP wrapper and unknown
+provider fields do not.
+
+The provider-neutral extractor then recognizes one `pff-draft/0.1` JSON object
+between exact marker lines. Arbitrary LLM prose before and after that block is
+captured for replay but remains semantically inert until the caller explicitly
+invokes `extract_draft`. Missing, duplicated, malformed, oversized, or
+unresolved blocks fail with deterministic typed diagnostics rather than
+heuristic repair.
 
 The first draft schema deliberately permits only nonprimitive atom proposals,
 positive rule alternatives, and certificate evidence requests. A separate
@@ -128,7 +140,7 @@ output were trusted.
 
 | Stage | Contract |
 |---|---|
-| Future provider adapter | Ask an LLM for a marker-delimited draft and capture each call as a fresh immutable attempt; no provider dependency is present in the semantic core |
+| Ollama adapter | Serialize the caller-supplied prompt for the selected local/cloud endpoint, make one injected transport call with no retry, strictly validate its response, and return a fresh immutable `GenerationEnvelope` |
 | Capture and extraction boundary | Retain exact prompt and response bytes plus identities, parameters, hashes, and lineage; strictly extract nonprimitive atoms, positive rules, and evidence requests |
 | Trusted evidence binder | Select permitted checker contracts, import or execute authenticated evidence, recompute local closures, and materialize the immutable `Package` |
 | Package validator | Reject malformed, unresolved, unknown, or type-invalid bound packages without assigning semantic status |
@@ -142,7 +154,10 @@ replay consumes the same captured bytes through the same parser without calling
 an LLM. A repair or fresh model call creates a new linked generation attempt
 rather than mutating the captured response or prior draft. External checkers
 remain separate: they supply typed evidence results, while the LLM supplies
-conjectural variation.
+conjectural variation. The slice has no concrete Ollama HTTP client,
+authentication or API-key loader, provider SDK or live-provider dependency, and
+stores no key or credential. Those deployment concerns and the trusted
+draft-to-package binder remain future, separately bounded layers.
 
 ## Verification
 
@@ -155,6 +170,6 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -B -m unittest discover -s test
 Remaining semantic freezes include closure-safe rule-target blocking, exact
 revocation selection, typed currentness targets, the retained defect/problem
 lifecycle, and compiler semantics for registry extension kinds. The provider
-adapter, trusted draft-to-package binder, canonical package bytes, explanation,
-replay controller, CLI, and empirical-pack work remain separate later
-milestones.
+HTTP/authentication transport and key loading, trusted draft-to-package binder,
+canonical package bytes, explanation, replay controller, CLI, and empirical-pack
+work remain separate later milestones.
